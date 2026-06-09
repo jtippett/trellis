@@ -17,8 +17,8 @@ module ReqLLM::Providers
   #
   # Subclasses `BaseProvider`, which wires `attach` in the fixed Pipeline-contract
   # step order; this class supplies identity, `prepare_request`, `encode_body`,
-  # and `decode_response`. Tool calling, streaming, and the Responses API are
-  # out of scope for this unit.
+  # and `decode_response`. Tool calling (encode + decode) is wired here;
+  # streaming and the Responses API are out of scope for this unit.
   class OpenAI < ReqLLM::BaseProvider
     def id : String
       "openai"
@@ -100,8 +100,8 @@ module ReqLLM::Providers
     # Response step: decode a Chat Completions JSON response into a semantic
     # `Response`, populating the assistant message, finish reason, and usage so
     # downstream usage/cost steps work end-to-end. Mirrors
-    # `Defaults.decode_response_body_openai_format` (text + finish_reason + usage;
-    # tool calls handled in a later unit).
+    # `Defaults.decode_response_body_openai_format` (text + tool calls +
+    # finish_reason + usage).
     def decode_response(req : HTTP::Request, resp : HTTP::Response) : {HTTP::Request, HTTP::Response}
       model = req.model.as(LLMDB::Model)
       data = JSON.parse(resp.body)
