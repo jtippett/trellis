@@ -9,12 +9,14 @@ module ReqLLM
 
     def self.from_wire(value : String?) : FinishReason
       case value
-      when "stop", "end_turn", "STOP"           then Stop
-      when "length", "max_tokens", "MAX_TOKENS" then Length
-      when "tool_calls", "tool_use"             then ToolCalls
-      when "content_filter", "SAFETY"           then ContentFilter
-      when nil                                  then Other
-      else                                           Other
+      when "stop", "end_turn", "STOP", "completed"                   then Stop
+      when "length", "max_tokens", "max_output_tokens", "MAX_TOKENS" then Length
+      when "tool_calls", "tool_use"                                  then ToolCalls
+      when "content_filter", "SAFETY"                                then ContentFilter
+      when nil                                                       then Other
+        # Unknown wire reasons map to Other (deliberate: upstream is itself
+        # inconsistent here, using :error in chat decode but :unknown in classify).
+      else Other
       end
     end
   end
@@ -23,9 +25,11 @@ module ReqLLM
     getter model : String
     getter context : Context?
     getter message : Message?
-    getter usage : Usage?
+    # usage and object are written by later pipeline steps (Steps.usage attaches
+    # cost; structured-output decode sets object), so they must be settable.
+    property usage : Usage?
     getter finish_reason : FinishReason?
-    getter object : JSON::Any?
+    property object : JSON::Any?
     property error : Exception?
 
     def initialize(@model : String, *, @context = nil, @message = nil,
