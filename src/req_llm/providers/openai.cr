@@ -85,7 +85,14 @@ module ReqLLM::Providers
       # stream is always present (value-based: the materialized default is false).
       body["stream"] = JSON::Any.new(opts.fetch_bool(:stream))
 
-      # tools omitted entirely when empty (tool-call encoding is a later unit).
+      # tools omitted entirely when empty (upstream guards `tools != []`); when
+      # present, each Tool renders to the OpenAI function shape via to_json_schema.
+      # `tool_choice` is emitted ONLY when the caller set it explicitly — upstream
+      # `Defaults.encode_chat_body` puts no default, so we omit the key otherwise.
+      tools = opts.fetch_tools
+      unless tools.empty?
+        body["tools"] = JSON::Any.new(tools.map { |t| JSON::Any.new(encode_tool(t)) })
+      end
 
       body.to_json
     end
@@ -174,6 +181,23 @@ module ReqLLM::Providers
         # Non-text parts (images/files/etc.) are out of scope for this unit.
         nil
       end
+    end
+
+    # Render a Tool to the OpenAI function wire shape (mirrors upstream
+    # `Schema.to_openai_format`): `{"type":"function","function":{name,
+    # description, parameters}}`, where `parameters` is the normalized JSON Schema
+    # object from `Tool#to_json_schema`.
+    private def encode_tool(tool : ReqLLM::Tool) : Hash(String, JSON::Any)
+      function = {
+        "name"        => JSON::Any.new(tool.name),
+        "description" => JSON::Any.new(tool.description),
+        "parameters"  => JSON::Any.new(tool.to_json_schema),
+      } of String => JSON::Any
+
+      {
+        "type"     => JSON::Any.new("function"),
+        "function" => JSON::Any.new(function),
+      } of String => JSON::Any
     end
 
     private def role_to_wire(role : ReqLLM::Role) : String

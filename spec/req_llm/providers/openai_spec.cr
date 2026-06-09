@@ -40,6 +40,36 @@ describe ReqLLM::Providers::OpenAI do
 
       parsed.as_h.has_key?("temperature").should be_false
     end
+
+    it "emits tools matching the canonical golden when the tools list is non-empty" do
+      ctx = ReqLLM::Context.new([
+        ReqLLM::Message.new(ReqLLM::Role::User, "What's the weather in Paris?"),
+      ])
+      model = LLMDB.model("openai:gpt-4o-mini")
+
+      schema = {
+        "properties" => JSON::Any.new({
+          "location" => JSON::Any.new({"type" => JSON::Any.new("string")}),
+        } of String => JSON::Any),
+        "required" => JSON::Any.new([JSON::Any.new("location")]),
+      } of String => JSON::Any
+      tool = ReqLLM::Tool.new("get_weather", "Get the current weather for a location", schema)
+
+      opts = ReqLLM::Options.validate({tools: [tool]})
+      body = ReqLLM::Providers::OpenAI.new.encode_chat_body(model, ctx, opts)
+
+      JSON.parse(body).should eq(JSON.parse(File.read("spec/golden/openai/chat_tools.json")))
+    end
+
+    it "omits tool_choice by default (upstream only emits when explicitly set)" do
+      ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "Hi")])
+      model = LLMDB.model("openai:gpt-4o-mini")
+      tool = ReqLLM::Tool.new("get_weather", "Get the current weather")
+      opts = ReqLLM::Options.validate({tools: [tool]})
+      parsed = JSON.parse(ReqLLM::Providers::OpenAI.new.encode_chat_body(model, ctx, opts))
+
+      parsed.as_h.has_key?("tool_choice").should be_false
+    end
   end
 
   describe "registration" do
