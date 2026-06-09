@@ -25,6 +25,7 @@ require "./llmdb/spec"
 require "./llmdb/model"
 require "./llmdb/catalog"
 require "./llmdb"
+require "./req_llm/providers/openai"
 
 module ReqLLM
   VERSION = "0.1.0"
