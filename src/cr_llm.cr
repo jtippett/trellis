@@ -7,6 +7,7 @@ require "./req_llm/tool"
 require "./req_llm/message"
 require "./req_llm/context"
 require "./req_llm/usage"
+require "./req_llm/stream_chunk"
 
 module ReqLLM
   VERSION = "0.1.0"
