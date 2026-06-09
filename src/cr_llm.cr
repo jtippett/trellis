@@ -18,6 +18,7 @@ require "./req_llm/retry_policy"
 require "./req_llm/steps"
 require "./req_llm/fixture"
 require "./llmdb/spec"
+require "./llmdb/model"
 
 module ReqLLM
   VERSION = "0.1.0"
