@@ -16,6 +16,7 @@ require "./req_llm/http/client_adapter"
 require "./req_llm/http/pipeline"
 require "./req_llm/retry_policy"
 require "./req_llm/steps"
+require "./req_llm/fixture"
 
 module ReqLLM
   VERSION = "0.1.0"
