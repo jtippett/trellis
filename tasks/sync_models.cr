@@ -65,10 +65,15 @@ module SyncModels
       exit 1
     end
 
-    write_catalog(entries)
-    version = bump_version
-    puts "wrote #{entries.size} models to #{DATA_PATH}"
-    puts "LLMDB::VERSION = #{version.inspect}"
+    # Only bump VERSION when the catalog content actually changed, so the
+    # weekly CI job opens a PR on real drift rather than on every date change.
+    if write_catalog(entries)
+      version = bump_version
+      puts "wrote #{entries.size} models to #{DATA_PATH} (catalog changed)"
+      puts "LLMDB::VERSION = #{version.inspect}"
+    else
+      puts "catalog unchanged (#{entries.size} models); VERSION left at #{current_version.inspect}"
+    end
   end
 
   # --- argument parsing ----------------------------------------------------
@@ -101,7 +106,7 @@ module SyncModels
       exit 1
     end
     response.body
-  rescue ex : Socket::Error | IO::Error
+  rescue ex : Socket::Error | IO::Error | OpenSSL::Error
     STDERR.puts "error: could not reach #{MODELS_DEV_URL}: #{ex.message}"
     STDERR.puts "       pass --source <path> to normalize from a local file instead."
     exit 1
@@ -206,10 +211,15 @@ module SyncModels
 
   # --- output --------------------------------------------------------------
 
-  private def write_catalog(entries : Array({String, JSON::Any})) : Nil
+  # Returns true if the catalog file content changed (and was rewritten).
+  private def write_catalog(entries : Array({String, JSON::Any})) : Bool
     top = {} of String => JSON::Any
     entries.each { |(key, model)| top[key] = model }
-    File.write(DATA_PATH, JSON::Any.new(top).to_pretty_json + "\n")
+    new_content = JSON::Any.new(top).to_pretty_json + "\n"
+    old_content = File.exists?(DATA_PATH) ? File.read(DATA_PATH) : nil
+    return false if old_content == new_content
+    File.write(DATA_PATH, new_content)
+    true
   end
 
   # Rewrite the LLMDB::VERSION date constant to today (UTC). Returns the value.
@@ -219,6 +229,14 @@ module SyncModels
     updated = content.sub(/VERSION = "\d{4}-\d{2}-\d{2}"/, %(VERSION = "#{today}"))
     File.write(LLMDB_PATH, updated) if updated != content
     today
+  end
+
+  private def current_version : String
+    if m = File.read(LLMDB_PATH).match(/VERSION = "(\d{4}-\d{2}-\d{2})"/)
+      m[1]
+    else
+      "unknown"
+    end
   end
 end
 
