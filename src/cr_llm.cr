@@ -19,6 +19,8 @@ require "./req_llm/steps"
 require "./req_llm/fixture"
 require "./llmdb/spec"
 require "./llmdb/model"
+require "./llmdb/catalog"
+require "./llmdb"
 
 module ReqLLM
   VERSION = "0.1.0"

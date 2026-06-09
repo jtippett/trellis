@@ -1,0 +1,70 @@
+{
+  "anthropic:claude-sonnet-4-5": {
+    "id": "claude-sonnet-4-5",
+    "name": "Claude Sonnet 4.5",
+    "provider": "anthropic",
+    "type": "chat",
+    "attachment": true,
+    "reasoning": true,
+    "temperature": true,
+    "tool_call": true,
+    "cost": {
+      "input": 3.0,
+      "output": 15.0,
+      "cache_read": 0.3
+    },
+    "limit": {
+      "context": 200000,
+      "output": 64000
+    },
+    "modalities": {
+      "input": ["text", "image"],
+      "output": ["text"]
+    }
+  },
+  "google:gemini-2.5-flash": {
+    "id": "gemini-2.5-flash",
+    "name": "Gemini 2.5 Flash",
+    "provider": "google",
+    "type": "chat",
+    "attachment": true,
+    "reasoning": true,
+    "temperature": true,
+    "tool_call": true,
+    "cost": {
+      "input": 0.3,
+      "output": 2.5
+    },
+    "limit": {
+      "context": 1048576,
+      "output": 65536
+    },
+    "modalities": {
+      "input": ["text", "image", "audio", "video"],
+      "output": ["text"]
+    }
+  },
+  "openai:gpt-4o-mini": {
+    "id": "gpt-4o-mini",
+    "name": "GPT-4o mini",
+    "provider": "openai",
+    "type": "chat",
+    "attachment": true,
+    "reasoning": false,
+    "temperature": true,
+    "tool_call": true,
+    "cost": {
+      "input": 0.15,
+      "output": 0.6,
+      "cache_read": 0.075
+    },
+    "limit": {
+      "context": 128000,
+      "output": 16384
+    },
+    "modalities": {
+      "input": ["text", "image"],
+      "output": ["text"]
+    }
+  }
+}
