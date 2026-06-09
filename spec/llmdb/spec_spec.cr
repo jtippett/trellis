@@ -3,14 +3,14 @@ require "../spec_helper"
 describe LLMDB::Spec do
   it "parses provider and model" do
     parsed = LLMDB::Spec.parse("openai:gpt-4o-mini")
-    parsed.provider.should eq(:openai)
+    parsed.provider.should eq("openai")
     parsed.model.should eq("gpt-4o-mini")
     parsed.tag.should be_nil
   end
 
   it "parses and tracks a tag" do
     parsed = LLMDB::Spec.parse("anthropic:claude-sonnet-4-5@20250929")
-    parsed.provider.should eq(:anthropic)
+    parsed.provider.should eq("anthropic")
     parsed.model.should eq("claude-sonnet-4-5")
     parsed.tag.should eq("20250929")
   end
@@ -28,7 +28,13 @@ describe LLMDB::Spec do
     expect_raises(ReqLLM::Error::Invalid::Parameter) { LLMDB::Spec.parse("openai:") }
   end
 
-  it "rejects an unknown provider" do
-    expect_raises(ReqLLM::Error::Invalid::Parameter, /provider/) { LLMDB::Spec.parse("nope:model") }
+  it "rejects a spec with an empty provider" do
+    expect_raises(ReqLLM::Error::Invalid::Parameter) { LLMDB::Spec.parse(":model") }
+  end
+
+  it "parses any provider string (no curated provider list)" do
+    parsed = LLMDB::Spec.parse("some-new-provider:model")
+    parsed.provider.should eq("some-new-provider")
+    parsed.model.should eq("model")
   end
 end

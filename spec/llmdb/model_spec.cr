@@ -21,7 +21,7 @@ describe LLMDB::Model do
     model = LLMDB::Model.from_json(MODEL_JSON)
     model.id.should eq("gpt-4o-mini")
     model.name.should eq("GPT-4o mini")
-    model.provider.should eq(:openai)
+    model.provider.should eq("openai")
     model.type.should eq("chat")
   end
 

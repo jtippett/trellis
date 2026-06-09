@@ -24,8 +24,8 @@ module LLMDB
     Catalog.all.values
   end
 
-  # The distinct providers present in the catalog.
-  def self.providers : Array(Symbol)
+  # The distinct provider ids present in the catalog.
+  def self.providers : Array(String)
     models.map(&.provider).uniq
   end
 end

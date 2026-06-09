@@ -4,7 +4,7 @@ module LLMDB
   # `src/req_llm/http/request.cr` (MUST remain a `class`, never a `struct`).
   #
   # Field mapping to the models.dev JSON shape (see req_llm/guides/model-metadata.md):
-  #   provider   <- "provider"   (string id; exposed as a Symbol via #provider)
+  #   provider   <- "provider"   (string id; exposed as a String via #provider)
   #   id         <- "id"
   #   name       <- "name"
   #   type       <- "type"       (default "chat")
@@ -54,8 +54,10 @@ module LLMDB
       end
     end
 
+    # The raw provider id (e.g. "openai"), the engine/catalog key. Exposed as
+    # `#provider` for parity with the rest of the engine.
     @[JSON::Field(key: "provider")]
-    getter provider_id : String
+    getter provider : String
     getter id : String
     getter name : String? = nil
     getter type : String = "chat"
@@ -69,16 +71,11 @@ module LLMDB
     getter limit : Limit = Limit.new
     getter modalities : Modalities = Modalities.new
 
-    def initialize(@provider_id : String, @id : String, *, @name : String? = nil,
+    def initialize(@provider : String, @id : String, *, @name : String? = nil,
                    @type : String = "chat", @tool_call : Bool = false,
                    @reasoning : Bool = false, @temperature : Bool = false,
                    @attachment : Bool = false, @cost : Cost = Cost.new,
                    @limit : Limit = Limit.new, @modalities : Modalities = Modalities.new)
-    end
-
-    # The provider as the Symbol the engine keys on.
-    def provider : Symbol
-      LLMDB.provider_symbol(@provider_id)
     end
 
     # The set of capability flags this model supports.
@@ -108,7 +105,7 @@ module LLMDB
 
     # The catalog key for this model, `"provider:id"`.
     def key : String
-      "#{@provider_id}:#{@id}"
+      "#{@provider}:#{@id}"
     end
   end
 end

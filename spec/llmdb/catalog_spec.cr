@@ -3,7 +3,7 @@ require "../spec_helper"
 describe LLMDB do
   it "looks up a model by spec string" do
     model = LLMDB.model("openai:gpt-4o-mini")
-    model.provider.should eq(:openai)
+    model.provider.should eq("openai")
     model.id.should eq("gpt-4o-mini")
     model.context_limit.should eq(128_000)
     model.cost.input.should eq(0.15)
@@ -12,8 +12,8 @@ describe LLMDB do
   end
 
   it "looks up the other seeded flagship models" do
-    LLMDB.model("anthropic:claude-sonnet-4-5").provider.should eq(:anthropic)
-    LLMDB.model("google:gemini-2.5-flash").provider.should eq(:google)
+    LLMDB.model("anthropic:claude-sonnet-4-5").provider.should eq("anthropic")
+    LLMDB.model("google:gemini-2.5-flash").provider.should eq("google")
   end
 
   it "ignores a tag when looking up" do
@@ -30,9 +30,9 @@ describe LLMDB do
 
   it "exposes all models and providers" do
     LLMDB.models.size.should be >= 3
-    LLMDB.providers.should contain(:openai)
-    LLMDB.providers.should contain(:anthropic)
-    LLMDB.providers.should contain(:google)
+    LLMDB.providers.should contain("openai")
+    LLMDB.providers.should contain("anthropic")
+    LLMDB.providers.should contain("google")
   end
 
   it "has a catalog version" do
