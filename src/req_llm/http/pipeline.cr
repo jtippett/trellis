@@ -1,6 +1,7 @@
 require "./request"
 require "./response"
 require "./adapter"
+require "../retry_policy"
 
 module ReqLLM::HTTP
   module Pipeline
@@ -30,9 +31,35 @@ module ReqLLM::HTTP
         raise ReqLLM::Error::API::Response.new("decode produced no response")
     end
 
-    # Plain transport; Task 14 replaces with retry-aware version.
+    # Retry-aware transport. The retry policy lives on the request (read here,
+    # never in an error step — see the Pipeline contract). The adapter is called
+    # inside a loop: while the response is retryable (HTTP 429/5xx) and attempts
+    # remain, wait (honoring a `Retry-After` header, else the policy's backoff)
+    # and call again; otherwise return the response.
     def perform(req : Request, adapter : Adapter) : Response
-      adapter.call(req)
+      policy = ReqLLM::RetryPolicy.from(req)
+      attempt = 0
+
+      loop do
+        resp = adapter.call(req)
+        return resp unless policy.retryable?(resp.status) && attempt < policy.max_retries
+
+        delay = retry_delay(resp, policy, attempt)
+        sleep delay unless delay.zero?
+        attempt += 1
+      end
+    end
+
+    # The wait before the next retry: a numeric `Retry-After` response header
+    # (seconds) takes precedence over the policy's exponential backoff. Split out
+    # so specs can assert the computed span without any real sleeping.
+    def retry_delay(resp : Response, policy : ReqLLM::RetryPolicy, attempt : Int32) : Time::Span
+      if raw = resp.headers["Retry-After"]?
+        if seconds = raw.to_i?
+          return seconds.seconds
+        end
+      end
+      policy.delay_for(attempt)
     end
   end
 end

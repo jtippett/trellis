@@ -19,3 +19,21 @@ class FakeAdapter
     ReqLLM::HTTP::Response.new(@status || 200, HTTP::Headers.new, body)
   end
 end
+
+# A test adapter that returns a preconfigured sequence of status codes (one per
+# call) and counts how many times `call` was invoked. Drives retry-loop specs
+# without any wall-clock waiting: assert on `#calls`, not on elapsed time.
+class CountingAdapter
+  include ReqLLM::HTTP::Adapter
+
+  getter calls : Int32 = 0
+
+  def initialize(@statuses : Array(Int32), @headers : ::HTTP::Headers = ::HTTP::Headers.new)
+  end
+
+  def call(request : ReqLLM::HTTP::Request) : ReqLLM::HTTP::Response
+    status = @statuses[@calls]? || @statuses.last
+    @calls += 1
+    ReqLLM::HTTP::Response.new(status, @headers, %({"ok":true}))
+  end
+end
