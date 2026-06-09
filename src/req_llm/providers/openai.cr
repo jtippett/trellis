@@ -113,11 +113,22 @@ module ReqLLM::Providers
       finish_wire = first_choice.try(&.["finish_reason"]?).try(&.as_s?)
       finish_reason = ReqLLM::FinishReason.from_wire(finish_wire)
 
-      text = first_choice
-        .try(&.["message"]?)
+      message_json = first_choice.try(&.["message"]?)
+
+      text = message_json
         .try(&.["content"]?)
         .try(&.as_s?) || ""
-      message = ReqLLM::Message.new(ReqLLM::Role::Assistant, text)
+
+      # Tool calls: decode `message.tool_calls` (OpenAI shape `[{id, type,
+      # function: {name, arguments}}]`) via `ToolCall.from_wire`, preserving the
+      # id/name/raw-arguments round-trip. Absent or non-array → no tool calls.
+      tool_calls = decode_tool_calls(message_json)
+
+      message = ReqLLM::Message.new(
+        ReqLLM::Role::Assistant,
+        text,
+        tool_calls: tool_calls.empty? ? nil : tool_calls,
+      )
 
       usage = decode_usage(data["usage"]?)
 
@@ -208,6 +219,15 @@ module ReqLLM::Providers
       when .tool?      then "tool"
       else                  role.to_s.downcase
       end
+    end
+
+    # Decode `message.tool_calls` into `ReqLLM::ToolCall`s. Each entry is the
+    # OpenAI nested wire shape, which `ToolCall.from_wire` consumes directly
+    # (preserving id, name, and the raw `arguments` JSON string for `args_map`).
+    private def decode_tool_calls(message : JSON::Any?) : Array(ReqLLM::ToolCall)
+      raw = message.try(&.["tool_calls"]?).try(&.as_a?)
+      return [] of ReqLLM::ToolCall unless raw
+      raw.map { |entry| ReqLLM::ToolCall.from_wire(entry) }
     end
 
     private def decode_usage(usage : JSON::Any?) : ReqLLM::Usage
