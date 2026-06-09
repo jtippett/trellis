@@ -1,0 +1,88 @@
+require "http/headers"
+require "uri"
+require "./response" # HTTP::Response, referenced by the step alias return types
+
+# Minimal forward-declared types so this file compiles standalone. Each is
+# reopened with real fields/methods later (Crystal allows reopening an empty
+# struct): Options::Validated in Task 20, RetryPolicy in Task 14, LLMDB::Model
+# in Task 17. The manifest (src/cr_llm.cr) must require content_part, message,
+# context, and response BEFORE http/request so the real types win at link time.
+module ReqLLM
+  module Options
+    struct Validated
+    end
+  end
+
+  struct RetryPolicy
+  end
+end
+
+module LLMDB
+  class Model
+  end
+end
+
+module ReqLLM::HTTP
+  # A request step returns a Request (continue) or an HTTP::Response (short-circuit
+  # into the response phase — e.g. fixture replay). Response/error steps fold pairs.
+  alias RequestStepProc = Request -> (Request | Response)
+  alias ResponseStepProc = (Request, Response) -> {Request, Response}
+  alias ErrorStepProc = (Request, Exception) -> Exception
+
+  class Request
+    property method : String
+    property url : URI
+    property headers : ::HTTP::Headers
+    property body : (IO | String | Bytes | Nil)
+
+    # Typed pipeline state (codex blocker 1: never JSON::Any for these).
+    property model : LLMDB::Model?
+    property context : ReqLLM::Context?
+    property operation : Symbol
+    property options : ReqLLM::Options::Validated?
+    property retry : ReqLLM::RetryPolicy?
+    property fixture : String? # fixture name; attach wires the fixture step when set
+
+    getter request_steps : Array({Symbol, RequestStepProc})
+    getter response_steps : Array({Symbol, ResponseStepProc})
+    getter error_steps : Array({Symbol, ErrorStepProc})
+
+    def initialize(@method, @url, @headers = ::HTTP::Headers.new, @body = nil)
+      @operation = :chat
+      @model = nil
+      @context = nil
+      @options = nil
+      @fixture = nil
+      @retry = nil
+      @request_steps = [] of {Symbol, RequestStepProc}
+      @response_steps = [] of {Symbol, ResponseStepProc}
+      @error_steps = [] of {Symbol, ErrorStepProc}
+    end
+
+    def append_request_step(name : Symbol, &block : RequestStepProc)
+      @request_steps << {name, block}; self
+    end
+
+    def prepend_request_step(name : Symbol, &block : RequestStepProc)
+      @request_steps.unshift({name, block}); self
+    end
+
+    def replace_request_step(name : Symbol, &block : RequestStepProc)
+      idx = @request_steps.index { |(n, _)| n == name }
+      idx ? (@request_steps[idx] = {name, block}) : (@request_steps << {name, block})
+      self
+    end
+
+    def append_response_step(name : Symbol, &block : ResponseStepProc)
+      @response_steps << {name, block}; self
+    end
+
+    def append_error_step(name : Symbol, &block : ErrorStepProc)
+      @error_steps << {name, block}; self
+    end
+
+    def request_step_names : Array(Symbol)
+      @request_steps.map { |(n, _)| n }
+    end
+  end
+end

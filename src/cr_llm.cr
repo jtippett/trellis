@@ -9,6 +9,8 @@ require "./req_llm/context"
 require "./req_llm/usage"
 require "./req_llm/stream_chunk"
 require "./req_llm/response"
+require "./req_llm/http/response"
+require "./req_llm/http/request"
 
 module ReqLLM
   VERSION = "0.1.0"
