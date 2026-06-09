@@ -5,3 +5,6 @@
 .DS_Store
 /spec/fixtures/**/*.tmp
 .env
+
+# Vendored upstream reference (not part of this shard)
+/req_llm/

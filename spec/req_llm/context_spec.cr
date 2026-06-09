@@ -41,7 +41,7 @@ describe ReqLLM::Context do
   end
 
   it "exposes tools passed to the constructor" do
-    tools = [ReqLLM::Tool.new]
+    tools = [ReqLLM::Tool.new("get_weather", "Get the current weather")]
     ctx = ReqLLM::Context.new([] of ReqLLM::Message, tools)
     ctx.tools.size.should eq(1)
   end
