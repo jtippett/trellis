@@ -17,6 +17,10 @@ describe "ReqLLM.generate_text" do
     usage = resp.usage.not_nil!
     usage.input_tokens.should eq(11)
     usage.output_tokens.should eq(7)
+
+    # Per-token cost is now wired through Steps.usage via provider.extract_usage
+    # and LLMDB::Model pricing (gpt-4o-mini: 0.15 in / 0.60 out per 1M tokens).
+    usage.cost.not_nil!.should be_close(5.85e-6, 1e-12)
   ensure
     if saved
       ENV["OPENAI_API_KEY"] = saved

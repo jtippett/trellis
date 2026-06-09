@@ -30,6 +30,13 @@ module LLMDB
 
       def initialize(@input = 0.0, @output = 0.0, @cached = nil)
       end
+
+      # The input/output pair as a NamedTuple, so this catalog `Cost` struct can
+      # be passed straight to `ReqLLM::Usage#cost(pricing)` (which indexes
+      # `pricing[:input]` / `pricing[:output]`).
+      def to_pricing : NamedTuple(input: Float64, output: Float64)
+        {input: input, output: output}
+      end
     end
 
     # Token limits for the model.

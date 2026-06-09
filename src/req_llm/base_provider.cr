@@ -52,8 +52,9 @@ module ReqLLM
       # 5. decode_response — response step that populates resp.decoded.
       req.append_response_step(:decode_response) { |r, resp| decode_response(r, resp) }
 
-      # 6. Steps.usage — response step after decode.
-      Steps.attach_usage(req)
+      # 6. Steps.usage — response step after decode. Pass `self` so the step can
+      #    source usage via `extract_usage` and compute cost from model pricing.
+      Steps.attach_usage(req, self)
 
       # 7. Fixture LAST, nil-guard (CRITICAL): only wire when a fixture name is
       #    set. In record mode this appends :fixture_capture (response step); in

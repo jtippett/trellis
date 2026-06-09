@@ -11,8 +11,17 @@ module ReqLLM
     getter reasoning_tokens : Int32
     getter cached_tokens : Int32
 
+    # The computed dollar cost for this exchange, attached by `Steps.usage`
+    # after decode (nil until the usage step runs with a priced model). The
+    # zero-arg `cost` reader returns this stored value; the `cost(pricing)` /
+    # `cost(input:, output:)` overloads COMPUTE a cost from a pricing pair and
+    # leave this field untouched — the step computes, then assigns the result
+    # back via `usage.cost = ...`.
+    property cost : Float64? = nil
+
     def initialize(@input_tokens : Int32 = 0, @output_tokens : Int32 = 0,
-                   @reasoning_tokens : Int32 = 0, @cached_tokens : Int32 = 0)
+                   @reasoning_tokens : Int32 = 0, @cached_tokens : Int32 = 0,
+                   @cost : Float64? = nil)
     end
 
     # Input plus output tokens.
@@ -21,7 +30,8 @@ module ReqLLM
     end
 
     # Dollar cost given a pricing pair in USD per 1,000,000 tokens, e.g.
-    # `usage.cost({input: 0.15, output: 0.60})`.
+    # `usage.cost({input: 0.15, output: 0.60})`. Use
+    # `LLMDB::Model::Cost#to_pricing` to feed a catalog `Cost` struct here.
     def cost(pricing) : Float64
       cost(input: pricing[:input], output: pricing[:output])
     end
