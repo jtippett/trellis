@@ -17,8 +17,37 @@
 - **TDD, always.** Write the failing spec, run it red, write minimal code, run it green, commit. Never write implementation before a failing test.
 - **One commit per task** (the final step of each task). Conventional-commit messages.
 - **Run `crystal tool format` before each commit.** CI rejects unformatted code.
-- **Phase 1 is fully detailed below.** Phases 2+ are task-level roadmaps; expand each into bite-sized TDD steps (same structure) when you reach it, using what Phase 1 taught you. Do not pre-expand — provider detail depends on the OpenAI slice.
+- **Phase 1 is fully detailed below.** Phases 2+ are task-level roadmaps; expand each into bite-sized TDD steps (same structure) when reached, using what Phase 1 taught you. Do not pre-expand — provider detail depends on the OpenAI slice.
 - **Definition of done for Phase 1:** `ReqLLM.generate_text("openai:gpt-4o-mini", "Hi")` returns a `Response` from a recorded fixture with no network, and a golden-encoding spec pins the request body. All specs green, formatted, committed.
+
+---
+
+## Pipeline contract (read before Tasks 10–15)
+
+This is the load-bearing model. It faithfully reproduces Req's plugin pipeline while staying type-safe in Crystal. Codex review round 1 flagged that an earlier draft conflated transport and semantic responses; this section is the corrected contract every pipeline task must honor.
+
+**Two response types, never conflated:**
+
+- **`ReqLLM::HTTP::Response`** — transport level. Fields: `status : Int32`, `headers : HTTP::Headers`, `body : String` (raw bytes as received), `decoded : ReqLLM::Response?` (populated by the provider's decode step), `private : Hash(Symbol, String)` (small scratch). This is what response steps fold over.
+- **`ReqLLM::Response`** — semantic level (the public result). It is produced by the decode step and stored in `HTTP::Response#decoded`. `Pipeline.run` returns `http_response.decoded`.
+
+**`ReqLLM::HTTP::Request` carries typed state, not JSON bags** (codex blocker 1 — `JSON::Any` cannot hold a `Context`, `LLMDB::Model`, tools, or procs):
+
+- `method`, `url`, `headers`, `body`
+- `model : LLMDB::Model?`, `context : ReqLLM::Context?`, `operation : Symbol` (default `:chat`)
+- `options : ReqLLM::Options::Validated?` (typed, validated request options)
+- `retry : ReqLLM::RetryPolicy?` (read by the pipeline, not a step)
+- `request_steps`, `response_steps`, `error_steps` (named)
+
+**`Pipeline.run(req, adapter)` order** (codex blockers 2, 3, 4):
+
+1. **Request steps** run in order. A step returns either a `Request` (continue) or an `HTTP::Response` (short-circuit — e.g. fixture replay supplies a raw response). On short-circuit, **skip transport but still run response steps** (so decode + usage execute on the fixture). Upstream fixture replay behaves exactly this way (`req_llm/test/support/fixture.ex:112`).
+2. **Transport with retry** (only if not short-circuited): the pipeline calls `adapter.call(req)` inside a retry loop governed by `req.retry` — retry on status 429/5xx honoring `Retry-After`, capped with backoff. Retry lives **in the pipeline around the adapter**, never in an error step (an error step has no adapter to re-run).
+3. **Response steps** fold `(req, http_resp) -> {req, http_resp}` in order: provider `decode_response` sets `http_resp.decoded`; `Steps.error` raises `Error::API::Request` when `http_resp.status >= 400`; `Steps.usage` reads the decoded body and attaches `Usage`.
+4. **Error steps** transform a raised exception (terminal augmentation only). On any raise during 2–3, fold error steps, then re-raise.
+5. Return `http_resp.decoded || raise Error::API::Response.new("decode produced no response")`.
+
+**Provider `attach` step order is fixed** (codex high — upstream `provider/defaults.ex:574`). `attach(req)` must, in this order: set `Content-Type`/auth headers and store `req.model`; append `Steps.error`; prepend `encode_body` (request step); append `decode_response` (response step); append `Steps.usage`; append the fixture step last. The model lives in `req.model` (typed), so decode/usage/fixture all read it the same way.
 
 ---
 
@@ -59,9 +88,12 @@ targets:
 .env
 ```
 
-**Step 3: Write the entrypoint `src/cr_llm.cr`**
+**Step 3: Write the entrypoint `src/cr_llm.cr`** — single require manifest:
 
 ```crystal
+require "json"
+require "./req_llm/error"
+
 module ReqLLM
   VERSION = "0.1.0"
 end
@@ -89,10 +121,7 @@ describe ReqLLM do
 end
 ```
 
-**Step 6: Run it**
-
-Run: `crystal spec spec/scaffold_spec.cr`
-Expected: PASS (1 example, 0 failures).
+**Step 6: Run it.** `crystal spec spec/scaffold_spec.cr` → expect FAIL (`./req_llm/error` missing), then create the file in Task 2. (To keep this task self-green, temporarily comment the error require, or do Task 2 before first running specs. Prefer: write Task 2's file now since the require points at it.)
 
 **Step 7: Commit**
 
@@ -108,12 +137,9 @@ git commit -m "chore: scaffold cr_llm shard"
 
 Mirrors `splode` usage in `./req_llm/lib/req_llm/error.ex`.
 
-**Files:**
-- Create: `src/req_llm/error.cr`
-- Test: `spec/req_llm/error_spec.cr`
-- Modify: `src/cr_llm.cr` (add `require "./req_llm/error"`)
+**Files:** Create `src/req_llm/error.cr`; Test `spec/req_llm/error_spec.cr`.
 
-**Step 1: Write the failing spec**
+**Step 1: Failing spec**
 
 ```crystal
 require "../spec_helper"
@@ -132,10 +158,7 @@ describe ReqLLM::Error do
 end
 ```
 
-**Step 2: Run it**
-
-Run: `crystal spec spec/req_llm/error_spec.cr`
-Expected: FAIL — `undefined constant ReqLLM::Error`.
+**Step 2: Run red** — `undefined constant ReqLLM::Error`.
 
 **Step 3: Implement `src/req_llm/error.cr`**
 
@@ -166,42 +189,15 @@ module ReqLLM
 end
 ```
 
-**Step 4: Wire the require** in `src/cr_llm.cr` (add `require "./req_llm/error"` after the module opens — or restructure so requires sit at top of file referencing the modules). Keep `src/cr_llm.cr` as the single require manifest:
-
-```crystal
-require "./req_llm/error"
-
-module ReqLLM
-  VERSION = "0.1.0"
-end
-
-module LLMDB
-end
-```
-
-**Step 5: Run it**
-
-Run: `crystal spec spec/req_llm/error_spec.cr`
-Expected: PASS.
-
-**Step 6: Commit**
-
-```bash
-crystal tool format
-git add src/req_llm/error.cr spec/req_llm/error_spec.cr src/cr_llm.cr
-git commit -m "feat: error hierarchy"
-```
+**Step 4: Run green. Step 5: Commit** `feat: error hierarchy`.
 
 ---
 
 ## Task 3: Key resolution and .env loader
 
-Mirrors `./req_llm/lib/req_llm/keys.ex` and the dotenvy usage. Precedence: explicit `api_key` opt → `ENV[<KEY>]` (loaded from `.env`).
+Mirrors `./req_llm/lib/req_llm/keys.ex` and dotenvy. Precedence: explicit `api_key` → `ENV[<KEY>]` (loaded from `.env`).
 
-**Files:**
-- Create: `src/req_llm/keys.cr`
-- Test: `spec/req_llm/keys_spec.cr`
-- Modify: `src/cr_llm.cr`
+**Files:** Create `src/req_llm/keys.cr`; Test `spec/req_llm/keys_spec.cr`.
 
 **Step 1: Failing spec**
 
@@ -234,9 +230,7 @@ describe ReqLLM::Keys do
 end
 ```
 
-**Step 2: Run red.** Expected: FAIL — undefined `ReqLLM::Keys`.
-
-**Step 3: Implement `src/req_llm/keys.cr`**
+**Step 2: Run red. Step 3: Implement `src/req_llm/keys.cr`**
 
 ```crystal
 module ReqLLM
@@ -252,7 +246,6 @@ module ReqLLM
         "Missing API key: set #{env_key} in the environment or pass api_key:")
     end
 
-    # Minimal dotenv parser: KEY=VALUE per line, # comments, optional quotes.
     def parse_env(contents : String) : Hash(String, String)
       result = {} of String => String
       contents.each_line do |line|
@@ -272,15 +265,13 @@ module ReqLLM
 
     def load_env_file(path : String = ".env") : Nil
       return unless File.exists?(path)
-      parse_env(File.read(path)).each do |k, v|
-        ENV[k] ||= v
-      end
+      parse_env(File.read(path)).each { |k, v| ENV[k] ||= v }
     end
   end
 end
 ```
 
-**Step 4: Run green.** **Step 5: Commit** `feat: api key resolution and .env loader`.
+**Step 4: green. Step 5: Commit** `feat: api key resolution and .env loader`.
 
 ---
 
@@ -288,9 +279,7 @@ end
 
 Mirrors `./req_llm/lib/req_llm/message/content_part.ex`.
 
-**Files:**
-- Create: `src/req_llm/content_part.cr`
-- Test: `spec/req_llm/content_part_spec.cr`
+**Files:** Create `src/req_llm/content_part.cr`; Test `spec/req_llm/content_part_spec.cr`.
 
 **Step 1: Failing spec**
 
@@ -323,9 +312,7 @@ describe ReqLLM::ContentPart do
 end
 ```
 
-**Step 2: Run red.**
-
-**Step 3: Implement `src/req_llm/content_part.cr`**
+**Step 2: red. Step 3: Implement `src/req_llm/content_part.cr`**
 
 ```crystal
 module ReqLLM
@@ -391,9 +378,9 @@ module ReqLLM
 end
 ```
 
-Add `require "json"` at the top of `src/cr_llm.cr` and `require "./req_llm/content_part"`.
+Add `require "./req_llm/content_part"` to `src/cr_llm.cr`.
 
-**Step 4: Run green.** **Step 5: Commit** `feat: ContentPart and role/part enums`.
+**Step 4: green. Step 5: Commit** `feat: ContentPart and role/part enums`.
 
 ---
 
@@ -403,7 +390,7 @@ Mirrors `./req_llm/lib/req_llm/message.ex`. Fields: `role`, `content` (Array(Con
 
 **Files:** Create `src/req_llm/message.cr`; Test `spec/req_llm/message_spec.cr`.
 
-**Step 1: Failing spec** — cover: build from a plain string content (auto-wraps to one text part), `valid?` (non-empty content or tool fields), and round-trip of `metadata`.
+**Step 1: Failing spec**
 
 ```crystal
 require "../spec_helper"
@@ -426,17 +413,17 @@ describe ReqLLM::Message do
 end
 ```
 
-**Step 2: Run red. Step 3: Implement** — constructor overloads for `String` and `Array(ContentPart)`; `valid?` returns true when content non-empty or `tool_calls`/`tool_call_id` present. **Step 4: green. Step 5: Commit** `feat: Message`.
+**Step 2: red. Step 3: Implement** — constructor overloads for `String` (wrap to one text part) and `Array(ContentPart)`; `valid?` returns true when content non-empty or `tool_calls`/`tool_call_id` present. **Step 4: green. Step 5: Commit** `feat: Message`.
 
 ---
 
 ## Task 6: Context
 
-Mirrors `./req_llm/lib/req_llm/context.ex`. A `class` (mutable carrier) wrapping `Array(Message)` with `append`, `prepend`, `concat`, `to_a`, and the `user`/`assistant`/`system` builder helpers.
+Mirrors `./req_llm/lib/req_llm/context.ex`. **Upstream Context carries both `messages` and `tools`** (`context.ex:36`) — include `tools` (codex medium). A `class` wrapping `Array(Message)` + `Array(Tool)` with `append`, `prepend`, `concat`, `to_a`, and the `user`/`assistant`/`system` builder helpers.
 
 **Files:** Create `src/req_llm/context.cr`; Test `spec/req_llm/context_spec.cr`.
 
-**Step 1: Failing spec** covering: `Context.new([...])`, `<<`/`append` returns self with message added, and the `Context.user("hi")` class helper produces a `Message` of role `User`.
+**Step 1: Failing spec** covering: `Context.new(messages)`, `<<`/`append` adds a message, `Context.user("hi")` produces a `Message` of role `User`, and `Context.new(messages, tools)` exposes `#tools`.
 
 **Step 2–5:** red → implement → green → commit `feat: Context`.
 
@@ -444,13 +431,11 @@ Mirrors `./req_llm/lib/req_llm/context.ex`. A `class` (mutable carrier) wrapping
 
 ## Task 7: ToolCall and Tool
 
-Mirrors `tool_call.ex` and `tool.ex`. `ToolCall`: `id`, `name`, `arguments` (raw JSON string) + `args_map`. `Tool`: `name`, `description`, `parameter_schema` (Hash describing JSON Schema), `callback` (Proc), `to_json_schema`.
+Mirrors `tool_call.ex` and `tool.ex`. We flatten the wire-nested OpenAI shape (`type`, `function: {name, arguments}`) into idiomatic `ToolCall(id, name, arguments)`, **but the plan requires (a) provider wire-conversion helpers `to_wire`/`from_wire` and (b) round-trip preservation of `builtin?` and `metadata` flags** (codex medium — upstream `tool_call.ex:39` keeps nested function + builtin/metadata). `Tool`: `name`, `description`, `parameter_schema` (Hash describing JSON Schema), `callback` (Proc), `to_json_schema`.
 
 **Files:** Create `src/req_llm/tool_call.cr`, `src/req_llm/tool.cr`; Tests alongside.
 
-**Step 1: Failing specs** — `ToolCall#args_map` parses JSON string to `Hash(String, JSON::Any)`; `Tool#to_json_schema` emits `{"type" => "object", "properties" => {...}, "required" => [...]}` from a parameter spec; `Tool.new` rejects an invalid name (`valid_name?`). **Steps 2–5** per task.
-
-Commit `feat: Tool and ToolCall`.
+**Step 1: Failing specs** — `ToolCall#args_map` parses the JSON string to `Hash(String, JSON::Any)`; `ToolCall.from_wire(json).to_wire` round-trips id/name/arguments/metadata; `Tool#to_json_schema` emits `{"type" => "object", "properties" => {...}, "required" => [...]}`; `Tool.new` rejects an invalid name (`valid_name?`). **Steps 2–5.** Commit `feat: Tool and ToolCall`.
 
 ---
 
@@ -460,7 +445,7 @@ Mirrors `usage.ex` and `usage/cost.ex`. `Usage`: `input_tokens`, `output_tokens`
 
 **Files:** Create `src/req_llm/usage.cr`; Test alongside.
 
-**Step 1: Failing spec** — given input/output token counts and a pricing pair `{input: 0.15, output: 0.60}` (USD per 1M tokens), `Usage.cost(...)` returns the correct dollar amount. **Steps 2–5.** Commit `feat: Usage and cost`.
+**Step 1: Failing spec** — given token counts and a pricing pair `{input: 0.15, output: 0.60}` (USD per 1M tokens), `Usage.cost(...)` returns the correct dollar amount. **Steps 2–5.** Commit `feat: Usage and cost`.
 
 ---
 
@@ -468,13 +453,13 @@ Mirrors `usage.ex` and `usage/cost.ex`. `Usage`: `input_tokens`, `output_tokens`
 
 Mirrors `stream_chunk.ex`. `type` enum (`Content | Thinking | ToolCall | Meta`), plus `text`, `name`, `arguments`, `metadata`. Constructors `.text`, `.thinking`, `.tool_call`, `.meta`.
 
-**Files:** Create `src/req_llm/stream_chunk.cr`; Test alongside. TDD as above. Commit `feat: StreamChunk`.
+**Files:** Create `src/req_llm/stream_chunk.cr`; Test alongside. TDD. Commit `feat: StreamChunk`.
 
 ---
 
-## Task 10: Response
+## Task 10: Response and FinishReason
 
-Mirrors `response.ex`. A `class` carrying `model`, `context`, `message` (the assistant reply), `usage`, `finish_reason`, optional `stream`/`object`. Accessors: `text` (concatenate text parts of `message`), `tool_calls`, `usage`, `finish_reason`, `ok?`.
+Mirrors `response.ex`. This task **fully specifies the semantic `Response`** so later tasks share one consistent shape (codex blocker 5). `finish_reason` is a **Crystal enum**, not a string (codex high — upstream normalizes to atoms `response.ex:38`, `defaults.ex:1551`).
 
 **Files:** Create `src/req_llm/response.cr`; Test `spec/req_llm/response_spec.cr`.
 
@@ -487,23 +472,86 @@ describe ReqLLM::Response do
   it "extracts text from the assistant message" do
     msg = ReqLLM::Message.new(ReqLLM::Role::Assistant,
       [ReqLLM::ContentPart.text("Hello "), ReqLLM::ContentPart.text("world")])
-    resp = ReqLLM::Response.new(model: "openai:gpt-4o-mini", message: msg)
+    resp = ReqLLM::Response.new(model: "openai:gpt-4o-mini", message: msg,
+      finish_reason: ReqLLM::FinishReason::Stop)
     resp.text.should eq("Hello world")
+    resp.finish_reason.should eq(ReqLLM::FinishReason::Stop)
+    resp.ok?.should be_true
+  end
+
+  it "normalizes wire finish reasons" do
+    ReqLLM::FinishReason.from_wire("stop").should eq(ReqLLM::FinishReason::Stop)
+    ReqLLM::FinishReason.from_wire("tool_calls").should eq(ReqLLM::FinishReason::ToolCalls)
+    ReqLLM::FinishReason.from_wire("length").should eq(ReqLLM::FinishReason::Length)
   end
 end
 ```
 
-**Steps 2–5.** Commit `feat: Response`.
+**Step 2: red. Step 3: Implement**
+
+```crystal
+module ReqLLM
+  enum FinishReason
+    Stop
+    Length
+    ToolCalls
+    ContentFilter
+    Error
+    Other
+
+    def self.from_wire(value : String?) : FinishReason
+      case value
+      when "stop", "end_turn", "STOP"            then Stop
+      when "length", "max_tokens", "MAX_TOKENS"  then Length
+      when "tool_calls", "tool_use"              then ToolCalls
+      when "content_filter", "SAFETY"            then ContentFilter
+      when nil                                   then Other
+      else                                            Other
+      end
+    end
+  end
+
+  class Response
+    getter model : String
+    getter context : Context?
+    getter message : Message?
+    getter usage : Usage?
+    getter finish_reason : FinishReason?
+    getter object : JSON::Any?
+    property error : Exception?
+
+    def initialize(@model : String, *, @context = nil, @message = nil,
+                   @usage = nil, @finish_reason = nil, @object = nil, @error = nil)
+    end
+
+    def text : String
+      msg = @message
+      return "" unless msg
+      String.build do |io|
+        msg.content.each { |p| io << p.text if p.type.text? && p.text }
+      end
+    end
+
+    def tool_calls : Array(ToolCall)
+      @message.try(&.tool_calls) || [] of ToolCall
+    end
+
+    def ok? : Bool
+      @error.nil?
+    end
+  end
+end
+```
+
+**Step 4: green. Step 5: Commit** `feat: Response and FinishReason enum`.
 
 ---
 
-## Task 11: HTTP::Request and named steps
+## Task 11: HTTP::Request, HTTP::Response, named steps
 
-The pipeline core. Mirrors how `Req.Request` threads steps; see `./req_llm/lib/req_llm/provider.ex`.
+The pipeline core. Implements the **Pipeline contract** section above. Mirrors `./req_llm/lib/req_llm/provider.ex`.
 
-**Files:**
-- Create: `src/req_llm/http/request.cr`
-- Test: `spec/req_llm/http/request_spec.cr`
+**Files:** Create `src/req_llm/http/request.cr`, `src/req_llm/http/response.cr`; Test `spec/req_llm/http/request_spec.cr`.
 
 **Step 1: Failing spec**
 
@@ -521,71 +569,97 @@ describe ReqLLM::HTTP::Request do
     req.replace_request_step(:a) { |r| r }
     req.request_step_names.should eq([:z, :a, :b]) # order preserved on replace
   end
+
+  it "carries typed model/context state, not JSON bags" do
+    req = ReqLLM::HTTP::Request.new("POST", URI.parse("https://x/y"))
+    req.operation.should eq(:chat)
+    req.model.should be_nil
+  end
 end
 ```
 
-**Step 2: Run red.**
+**Step 2: red. Step 3: Implement `src/req_llm/http/response.cr`**
 
-**Step 3: Implement `src/req_llm/http/request.cr`**
+```crystal
+require "http/headers"
+
+module ReqLLM::HTTP
+  class Response
+    property status : Int32
+    property headers : ::HTTP::Headers
+    property body : String
+    property decoded : ReqLLM::Response?
+    property private : Hash(Symbol, String)
+
+    def initialize(@status, @headers, @body)
+      @decoded = nil
+      @private = {} of Symbol => String
+    end
+  end
+end
+```
+
+**Implement `src/req_llm/http/request.cr`**
 
 ```crystal
 require "http/headers"
 require "uri"
 
 module ReqLLM::HTTP
-  # A request step may return a Request (continue) or a Response (short-circuit).
-  alias RequestStepProc = Request -> (Request | ReqLLM::Response)
-  alias ResponseStepProc = (Request, ReqLLM::Response) -> {Request, ReqLLM::Response}
-  alias ErrorStepProc = (Request, Exception) -> (ReqLLM::Response | Exception)
+  # A request step returns a Request (continue) or an HTTP::Response (short-circuit
+  # into the response phase — e.g. fixture replay). Response/error steps fold pairs.
+  alias RequestStepProc  = Request -> (Request | Response)
+  alias ResponseStepProc = (Request, Response) -> {Request, Response}
+  alias ErrorStepProc    = (Request, Exception) -> Exception
 
   class Request
     property method : String
     property url : URI
-    property headers : HTTP::Headers
+    property headers : ::HTTP::Headers
     property body : (IO | String | Bytes | Nil)
-    property options : Hash(Symbol, JSON::Any)
-    property private : Hash(Symbol, JSON::Any)
+
+    # Typed pipeline state (codex blocker 1: never JSON::Any for these).
+    property model : LLMDB::Model?
+    property context : ReqLLM::Context?
+    property operation : Symbol
+    property options : ReqLLM::Options::Validated?
+    property retry : ReqLLM::RetryPolicy?
 
     getter request_steps : Array({Symbol, RequestStepProc})
     getter response_steps : Array({Symbol, ResponseStepProc})
     getter error_steps : Array({Symbol, ErrorStepProc})
 
-    def initialize(@method, @url, @headers = HTTP::Headers.new, @body = nil)
-      @options = {} of Symbol => JSON::Any
-      @private = {} of Symbol => JSON::Any
+    def initialize(@method, @url, @headers = ::HTTP::Headers.new, @body = nil)
+      @operation = :chat
+      @model = nil
+      @context = nil
+      @options = nil
+      @retry = nil
       @request_steps = [] of {Symbol, RequestStepProc}
       @response_steps = [] of {Symbol, ResponseStepProc}
       @error_steps = [] of {Symbol, ErrorStepProc}
     end
 
     def append_request_step(name : Symbol, &block : RequestStepProc)
-      @request_steps << {name, block}
-      self
+      @request_steps << {name, block}; self
     end
 
     def prepend_request_step(name : Symbol, &block : RequestStepProc)
-      @request_steps.unshift({name, block})
-      self
+      @request_steps.unshift({name, block}); self
     end
 
     def replace_request_step(name : Symbol, &block : RequestStepProc)
       idx = @request_steps.index { |(n, _)| n == name }
-      if idx
-        @request_steps[idx] = {name, block}
-      else
-        @request_steps << {name, block}
-      end
+      idx ? (@request_steps[idx] = {name, block}) : (@request_steps << {name, block})
       self
     end
 
     def append_response_step(name : Symbol, &block : ResponseStepProc)
-      @response_steps << {name, block}
-      self
+      @response_steps << {name, block}; self
     end
 
     def append_error_step(name : Symbol, &block : ErrorStepProc)
-      @error_steps << {name, block}
-      self
+      @error_steps << {name, block}; self
     end
 
     def request_step_names : Array(Symbol)
@@ -595,65 +669,60 @@ module ReqLLM::HTTP
 end
 ```
 
-**Step 4: Run green. Step 5: Commit** `feat: HTTP::Request with named step pipeline`.
+> Note: `options : Options::Validated?` and `retry : RetryPolicy?` are forward references; define stub types in Task 11 (empty structs) and flesh them out in Tasks 20 / 14 respectively, or guard the requires so this file compiles standalone. Simplest: declare `Options::Validated` and `RetryPolicy` as minimal types here, extend later.
+
+**Step 4: green. Step 5: Commit** `feat: HTTP::Request/Response with named step pipeline`.
 
 ---
 
-## Task 12: Pipeline with short-circuit, against a fake adapter
+## Task 12: Pipeline — short-circuit, transport, response folding
 
-**Files:**
-- Create: `src/req_llm/http/adapter.cr` (the adapter interface + a `FakeAdapter` for tests lives in spec support)
-- Create: `src/req_llm/http/pipeline.cr`
-- Create: `spec/support/fake_adapter.cr`
-- Test: `spec/req_llm/http/pipeline_spec.cr`
+Implements steps 1, 3, 5 of the Pipeline contract (retry, step 2, lands in Task 14). Mirrors how `Req` runs steps.
 
-**Step 1: Failing spec** — two behaviors:
+**Files:** Create `src/req_llm/http/adapter.cr`, `src/req_llm/http/pipeline.cr`, `spec/support/fake_adapter.cr`; Test `spec/req_llm/http/pipeline_spec.cr`.
+
+**Step 1: Failing spec**
 
 ```crystal
 require "../../spec_helper"
 require "../../support/fake_adapter"
 
 describe ReqLLM::HTTP::Pipeline do
-  it "short-circuits when a request step returns a Response" do
+  it "short-circuits transport but still runs response steps" do
     req = ReqLLM::HTTP::Request.new("POST", URI.parse("https://x/y"))
-    canned = ReqLLM::Response.new(model: "x", message: nil)
-    req.append_request_step(:cache) { |_| canned }
-    adapter = FakeAdapter.new # would raise if called
-    resp = ReqLLM::HTTP::Pipeline.run(req, adapter)
-    resp.should be(canned)
-    adapter.called?.should be_false
+    canned = ReqLLM::HTTP::Response.new(200, HTTP::Headers.new, %({"ok":true}))
+    req.append_request_step(:fixture) { |_| canned }
+    req.append_response_step(:decode) do |r, resp|
+      resp.decoded = ReqLLM::Response.new(model: "x",
+        message: ReqLLM::Message.new(ReqLLM::Role::Assistant, "hi"))
+      {r, resp}
+    end
+    adapter = FakeAdapter.new # raises if called
+    out = ReqLLM::HTTP::Pipeline.run(req, adapter)
+    adapter.called?.should be_false   # transport skipped
+    out.text.should eq("hi")          # decode still ran
   end
 
   it "runs the adapter then folds response steps" do
     req = ReqLLM::HTTP::Request.new("POST", URI.parse("https://x/y"))
     adapter = FakeAdapter.new(status: 200, body: %({"ok":true}))
-    req.append_response_step(:tag) { |r, resp| resp.private[:tag] = JSON::Any.new("done"); {r, resp} }
-    resp = ReqLLM::HTTP::Pipeline.run(req, adapter)
+    req.append_response_step(:decode) do |r, resp|
+      resp.decoded = ReqLLM::Response.new(model: "x")
+      {r, resp}
+    end
+    ReqLLM::HTTP::Pipeline.run(req, adapter)
     adapter.called?.should be_true
-    resp.private[:tag].as_s.should eq("done")
   end
 end
 ```
 
-(Adjust `Response.new` signature/`private` access to match Task 10; add a `private` Hash to `Response` if not present.)
-
-**Step 2: Run red.**
-
-**Step 3: Implement** the adapter interface and pipeline:
+**Step 2: red. Step 3: Implement**
 
 ```crystal
 # src/req_llm/http/adapter.cr
 module ReqLLM::HTTP
-  # Raw transport result before provider decoding.
-  struct RawResponse
-    getter status : Int32
-    getter headers : ::HTTP::Headers
-    getter body : String
-    def initialize(@status, @headers, @body); end
-  end
-
   module Adapter
-    abstract def call(request : Request) : RawResponse
+    abstract def call(request : Request) : Response
   end
 end
 ```
@@ -665,49 +734,48 @@ module ReqLLM::HTTP
     extend self
 
     def run(req : Request, adapter : Adapter) : ReqLLM::Response
-      # 1. request steps (may short-circuit by returning a Response)
+      http_resp : Response? = nil
+
       req.request_steps.each do |(_name, step)|
         case result = step.call(req)
-        when ReqLLM::Response then return result
-        when Request          then req = result
+        when Response then http_resp = result; break
+        when Request  then req = result
         end
       end
 
-      # 2. transport + 3. response steps, with error steps on raise
       begin
-        raw = adapter.call(req)
-        resp = ReqLLM::Response.from_raw(req, raw) # provider decode wires in here
+        http_resp ||= perform(req, adapter) # Task 14 swaps in retry-aware perform
         req.response_steps.each do |(_name, step)|
-          req, resp = step.call(req, resp)
+          req, http_resp = step.call(req, http_resp.not_nil!)
         end
-        resp
       rescue ex
-        req.error_steps.each do |(_name, step)|
-          case handled = step.call(req, ex)
-          when ReqLLM::Response then return handled
-          when Exception        then ex = handled
-          end
-        end
+        req.error_steps.each { |(_n, s)| ex = s.call(req, ex) }
         raise ex
       end
+
+      http_resp.not_nil!.decoded ||
+        raise ReqLLM::Error::API::Response.new("decode produced no response")
+    end
+
+    # Plain transport; Task 14 replaces with retry-aware version.
+    def perform(req : Request, adapter : Adapter) : Response
+      adapter.call(req)
     end
   end
 end
 ```
 
-Note: `Response.from_raw` is a seam — for now a minimal version that stores the raw body; providers replace it via a response step (`decode_response`). Add a `spec/support/fake_adapter.cr` implementing `ReqLLM::HTTP::Adapter` with a `called?` flag.
+`spec/support/fake_adapter.cr`: a class `include ReqLLM::HTTP::Adapter` with a `called?` flag; `call` returns a configured `HTTP::Response` or raises if constructed with no body.
 
-**Step 4: Run green. Step 5: Commit** `feat: pipeline with short-circuit and error steps`.
+**Step 4: green. Step 5: Commit** `feat: pipeline with short-circuit and response folding`.
 
 ---
 
-## Task 13: Real adapter over HTTP::Client (tested against a local server)
+## Task 13: Real adapter over HTTP::Client (local-server test)
 
-**Files:**
-- Create: `src/req_llm/http/client_adapter.cr`
-- Test: `spec/req_llm/http/client_adapter_spec.cr`
+**Files:** Create `src/req_llm/http/client_adapter.cr`; Test `spec/req_llm/http/client_adapter_spec.cr`.
 
-**Step 1: Failing spec** — spin up a stdlib `HTTP::Server` on an ephemeral port in the spec, point a `Request` at it, assert the adapter returns the right status/body. Use `condition-based-waiting` (@superpowers:condition-based-waiting) to wait for the server to bind rather than sleeping.
+**Step 1: Failing spec** — start a stdlib `HTTP::Server` on an ephemeral port, point a `Request` at it, assert status/body. Use @superpowers:condition-based-waiting to wait for the bind rather than sleeping.
 
 ```crystal
 require "../../spec_helper"
@@ -725,9 +793,9 @@ describe ReqLLM::HTTP::ClientAdapter do
       req = ReqLLM::HTTP::Request.new("POST",
         URI.parse("http://#{address.address}:#{address.port}/v1/chat"))
       req.body = %({"q":"hi"})
-      raw = ReqLLM::HTTP::ClientAdapter.new.call(req)
-      raw.status.should eq(201)
-      raw.body.should contain("echo")
+      resp = ReqLLM::HTTP::ClientAdapter.new.call(req)
+      resp.status.should eq(201)
+      resp.body.should contain("echo")
     ensure
       server.close
     end
@@ -735,9 +803,7 @@ describe ReqLLM::HTTP::ClientAdapter do
 end
 ```
 
-**Step 2: Run red.**
-
-**Step 3: Implement `src/req_llm/http/client_adapter.cr`**
+**Step 2: red. Step 3: Implement `src/req_llm/http/client_adapter.cr`**
 
 ```crystal
 require "http/client"
@@ -746,58 +812,64 @@ module ReqLLM::HTTP
   class ClientAdapter
     include Adapter
 
-    def call(request : Request) : RawResponse
+    def call(request : Request) : Response
       body = case b = request.body
-             when IO     then b.gets_to_end
-             when Bytes  then String.new(b)
-             else             b # String? | Nil
+             when IO    then b.gets_to_end
+             when Bytes then String.new(b)
+             else            b # String? | Nil
              end
-      response = ::HTTP::Client.exec(
-        request.method,
-        request.url.to_s,
-        headers: request.headers,
-        body: body,
-      )
-      RawResponse.new(response.status_code, response.headers, response.body)
+      raw = ::HTTP::Client.exec(request.method, request.url.to_s,
+        headers: request.headers, body: body)
+      Response.new(raw.status_code, raw.headers, raw.body)
     end
   end
 end
 ```
 
-**Step 4: Run green. Step 5: Commit** `feat: HTTP::Client adapter`. (Streaming adapter comes in Phase 4.)
+**Step 4: green. Step 5: Commit** `feat: HTTP::Client adapter`.
 
 ---
 
-## Task 14: Shared steps — encode_body, decode wiring, error, retry, usage
+## Task 14: Shared steps + retry-aware transport
 
-Mirrors `./req_llm/lib/req_llm/step/*.ex` and `provider/defaults.ex`. These are reusable building blocks providers compose. Implement each as a small module returning a named step closure.
+Mirrors `./req_llm/lib/req_llm/step/*.ex` and `provider/defaults.ex`. **Retry lives in the pipeline, not an error step** (codex blocker 4 — upstream attaches retry config before execution and the engine performs it, `step/retry.ex:52`).
 
-**Files:** Create `src/req_llm/steps.cr`; Test `spec/req_llm/steps_spec.cr`.
+**Files:** Create `src/req_llm/retry_policy.cr`, `src/req_llm/steps.cr`; Modify `src/req_llm/http/pipeline.cr` (`perform` → retry loop); Test `spec/req_llm/steps_spec.cr`, `spec/req_llm/retry_spec.cr`.
 
-Implement, TDD each:
-- `Steps.error` — a response step that raises `Error::API::Request.new(body, status: ...)` when `raw.status >= 400`.
-- `Steps.retry` — an error step that retries `Error::API::Request` with status 429/5xx, honoring `Retry-After`, capped retries with backoff. Test with a counter-based fake adapter and `condition-based-waiting`.
-- `Steps.usage` — a response step that reads usage from the decoded body and attaches `Usage` (provider supplies the extractor).
+TDD, each its own red→green→commit:
+- **`RetryPolicy`** — `max_retries`, `base_delay`, predicate `retryable?(status)` (429/5xx). `Response#retry` defaults to a sane policy.
+- **Pipeline `perform` retry loop** — call adapter; if `policy.retryable?(resp.status)` and attempts remain, sleep `Retry-After`-or-backoff and retry. Test with a counter-based `FakeAdapter` that returns 503 twice then 200; assert 3 calls and a final 200. Use @superpowers:condition-based-waiting patterns (poll the counter), keep delays tiny in test via an injected clock/zero base_delay.
+- **`Steps.error`** — response step: `raise Error::API::Request.new(resp.body, status: resp.status)` when `resp.status >= 400`. Reads `resp.status` directly (the contract preserves it).
+- **`Steps.usage`** — response step: read `resp.decoded.try(&.usage)` already set by decode, or compute from the decoded body + `req.model` pricing; attach `Usage`.
 
-Each: failing spec → implement → green → commit. Final commit `feat: shared pipeline steps`.
+Final commit `feat: retry-aware transport and shared steps`.
 
 ---
 
 ## Task 15: Fixture step (record/replay)
 
-The test harness. Reuses the short-circuit seam from Task 12. Mirrors `./req_llm/lib/req_llm/step/fixture.ex`.
+The test harness, built on the Pipeline contract's short-circuit-then-still-fold behavior (codex blocker 3). Mirrors `./req_llm/test/support/fixture.ex`.
 
-**Files:**
-- Create: `src/req_llm/fixture.cr`
-- Test: `spec/req_llm/fixture_spec.cr`
-- Fixtures dir: `spec/fixtures/`
+**Fixture JSON schema (ours — specified here so agents don't invent incompatible files, codex medium):**
+
+```json
+{
+  "status": 200,
+  "headers": {"content-type": "application/json"},
+  "body": "<raw response body string>"
+}
+```
+
+(Phase 2 streaming extends this with `"stream": ["<sse frame>", ...]` instead of `"body"`.)
 
 **Behavior:**
-- `Fixture.step(provider, name)` returns a request step.
-- **Replay mode (default):** if `spec/fixtures/<provider>/<name>.json` exists, parse it into a `RawResponse`, decode to a `Response`, and short-circuit.
-- **Record mode (`ENV["CR_LLM_FIXTURES"]? == "record"`):** do not short-circuit; instead append a response step that writes the raw status/headers/body to the fixture path.
+- `Fixture.step(provider, name)` returns a **request step**.
+- **Replay (default):** if `spec/fixtures/<provider>/<name>.json` exists, parse it into a raw `HTTP::Response` (status/headers/body, `decoded == nil`) and **return it** — the pipeline skips transport but still runs `decode_response`/`Steps.error`/`Steps.usage`. No network, no keys.
+- **Record (`ENV["CR_LLM_FIXTURES"]? == "record"`):** do not short-circuit; append an *early* response step that serializes `{status, headers, body}` to the fixture path before returning the pair unchanged.
 
-**Step 1: Failing spec** — write a fixture JSON to a temp path, attach the replay step, run the pipeline with a `FakeAdapter` that would raise, assert the response came from the fixture (adapter never called).
+**Files:** Create `src/req_llm/fixture.cr`; Test `spec/req_llm/fixture_spec.cr`; Fixtures dir `spec/fixtures/`.
+
+**Step 1: Failing spec** — write a fixture JSON to disk, attach `Fixture.step` + a decode response step, run the pipeline with a `FakeAdapter` that raises; assert the decoded text came from the fixture body and the adapter was never called.
 
 **Steps 2–5.** Commit `feat: fixture record/replay step`.
 
@@ -833,27 +905,29 @@ end
 
 ## Task 17: LLMDB::Model
 
-Mirrors `LLMDB.Model`. Fields: `provider` (Symbol), `id`, `name`, `capabilities` (Hash(String, Bool) or typed), `limit` (context/output), `modalities`, `cost` (input/output/cached). `JSON::Serializable` for loading from vendored data.
+Mirrors `LLMDB.Model`. Fields: `provider` (Symbol), `id`, `name`, `capabilities`, `limit` (context/output), `modalities`, `cost` (input/output/cached). `JSON::Serializable` for loading vendored data.
 
 **Files:** Create `src/llmdb/model.cr`; Test alongside.
 
-**Step 1: Failing spec** — construct from a JSON object matching the models.dev shape; assert `supports?(:tools)`, `context_limit`, and `cost.input`. **Steps 2–5.** Commit `feat: LLMDB::Model`.
+**Step 1: Failing spec** — construct from a JSON object matching the models.dev shape; assert `supports?(:tools)`, `context_limit`, `cost.input`. **Steps 2–5.** Commit `feat: LLMDB::Model`.
 
 ---
 
-## Task 18: Vendored catalog + lookup
+## Task 18: Vendored catalog + lookup (offline-seedable)
 
-**Files:**
-- Create: `src/llmdb/data/models.json` (a small hand-seeded subset for now: the three flagship models — replaced wholesale by the sync task in Task 19)
-- Create: `src/llmdb/catalog.cr`
-- Create: `src/llmdb.cr` facade (`LLMDB.model`, `LLMDB.models`, `LLMDB.providers`)
-- Test: `spec/llmdb/catalog_spec.cr`
+**Files:** Create `src/llmdb/data/models.json`, `src/llmdb/catalog.cr`, `src/llmdb.cr` facade; Test `spec/llmdb/catalog_spec.cr`.
 
-**Step 1: Seed `models.json`** with three entries (`openai:gpt-4o-mini`, `anthropic:claude-sonnet-4-5`, `google:gemini-2.5-flash`) using the real models.dev field shape (read `https://models.dev/api.json` once to copy exact keys; commit the subset).
+**Seeding (offline-first — codex high; do not require network here):** seed `models.json` with the three flagship models, sourced in priority order:
+1. `req_llm/priv/supported_models.json` (checked in locally) if it contains them, else
+2. a committed minimal hand-authored subset using the models.dev field shape.
 
-**Step 2: Failing spec** — `LLMDB.model("openai:gpt-4o-mini")` returns a `Model` with the right `provider`, `context_limit`, and cost. Unknown spec raises.
+The live `models.dev` fetch is **Task 19's** job, not a prerequisite for this task.
 
-**Step 3: Implement** the catalog: embed the JSON at compile time via `{{ read_file("#{__DIR__}/data/models.json") }}`, parse once into a memoized `Hash(String, Model)` keyed by `"provider:id"`. `LLMDB.model(spec)` parses via `LLMDB::Spec` and looks up.
+**Step 1: Seed `models.json`** with `openai:gpt-4o-mini`, `anthropic:claude-sonnet-4-5`, `google:gemini-2.5-flash`.
+
+**Step 2: Failing spec** — `LLMDB.model("openai:gpt-4o-mini")` returns a `Model` with the right `provider`, `context_limit`, cost. Unknown spec raises.
+
+**Step 3: Implement** the catalog: embed the JSON at compile time via `{{ read_file("#{__DIR__}/data/models.json") }}`, parse once into a memoized `Hash(String, Model)` keyed `"provider:id"`. `LLMDB.model(spec)` parses via `LLMDB::Spec` and looks up.
 
 **Steps 4–5.** Commit `feat: embedded models.dev catalog and lookup`.
 
@@ -861,17 +935,12 @@ Mirrors `LLMDB.Model`. Fields: `provider` (Symbol), `id`, `name`, `capabilities`
 
 ## Task 19: sync_models automation task
 
-**Files:**
-- Create: `tasks/sync_models.cr`
-- Modify: `shard.yml` (no new target needed; run via `crystal run tasks/sync_models.cr`)
-- Create: `.github/workflows/sync-models.yml`
+**Files:** Create `tasks/sync_models.cr`, `.github/workflows/sync-models.yml`.
 
-**Behavior:** fetch `https://models.dev/api.json`, normalize to our `Model` JSON shape, write `src/llmdb/data/models.json` sorted deterministically (stable key order so diffs are clean), and bump a `LLMDB::VERSION` date constant. The GitHub Action runs weekly, runs the task, and opens a PR if `git status` shows changes.
+**Behavior:** fetch `https://models.dev/api.json`, normalize to our `Model` JSON shape, write `src/llmdb/data/models.json` with deterministic key order (clean diffs), bump a `LLMDB::VERSION` date constant. **Offline fallback:** accept `--source <path>` to normalize from a local file (e.g. `req_llm/priv/supported_models.json`) when the network is unavailable. The GitHub Action runs weekly and opens a PR when the data changed.
 
-This task has no unit spec (it is I/O automation); verify manually:
-
-Run: `crystal run tasks/sync_models.cr`
-Expected: `src/llmdb/data/models.json` rewritten; `crystal spec` still green; the three flagship models still resolve.
+No unit spec (I/O automation); verify manually:
+`crystal run tasks/sync_models.cr -- --source req_llm/priv/supported_models.json` → `models.json` rewritten; `crystal spec` still green; the three flagship models still resolve.
 
 Commit `feat: models.dev sync task and weekly CI`.
 
@@ -879,38 +948,35 @@ Commit `feat: models.dev sync task and weekly CI`.
 
 ## Task 20: Options validation
 
-Mirrors `nimble_options` usage in `./req_llm/lib/req_llm/provider/options.ex`.
+Mirrors `nimble_options` usage in `./req_llm/lib/req_llm/provider/options.ex`. Replaces the Task 11 stub `Options::Validated` with the real type.
 
 **Files:** Create `src/req_llm/options.cr`; Test alongside.
 
-**Step 1: Failing spec** — a schema with `temperature` (Float64, range 0.0..2.0), `max_tokens` (Int32?, default nil), `stream` (Bool, default false). Validating `{temperature: 0.7}` returns a typed result with `stream == false`; validating `{temperature: 3.0}` raises `Invalid::Parameter`; an unknown key raises.
-
-**Steps 2–5.** Commit `feat: options schema validation`.
+**Step 1: Failing spec** — schema with `temperature` (Float64, range 0.0..2.0), `max_tokens` (Int32?, default nil), `stream` (Bool, default false). Validating `{temperature: 0.7}` returns a typed `Validated` with `stream == false`; `{temperature: 3.0}` raises `Invalid::Parameter`; an unknown key raises. **Steps 2–5.** Commit `feat: options schema validation`.
 
 ---
 
 ## Task 21: Provider abstraction, BaseProvider, Registry
 
-Mirrors `./req_llm/lib/req_llm/provider.ex` and `provider/defaults.ex`.
+Mirrors `./req_llm/lib/req_llm/provider.ex` and `provider/defaults.ex`. **`BaseProvider#attach` must follow the fixed step order in the Pipeline contract section** (codex high), storing the model in `req.model`.
 
-**Files:** Create `src/req_llm/provider.cr`, `src/req_llm/base_provider.cr`, `src/req_llm/registry.cr`; Test `spec/req_llm/registry_spec.cr`.
+**Files:** Create `src/req_llm/provider.cr`, `src/req_llm/base_provider.cr`, `src/req_llm/registry.cr`; Test `spec/req_llm/registry_spec.cr` and `spec/req_llm/base_provider_spec.cr`.
 
-**Step 1: Failing spec** — register a stub provider under `:stub`, assert `ReqLLM::Registry.fetch(:stub)` returns it and an unknown id raises `Invalid::Parameter`.
+**Step 1: Failing specs** — (a) register a stub provider under `:stub`; `Registry.fetch(:stub)` returns it, unknown id raises `Invalid::Parameter`. (b) a stub provider's `attach(req)` produces `req.model` set and step names in the contract order (`[:error]` response steps include error/decode/usage/fixture in the pinned order).
 
-**Step 2–3:** Define the `Provider` module (abstract methods from the design §4), a `BaseProvider` abstract class with default `extract_usage`/`attach_stream`, and a `Registry` mapping symbols to instances. **Steps 4–5.** Commit `feat: provider abstraction and registry`.
+**Step 2–3:** Define `Provider` module (abstract methods from design §4 + Pipeline contract), `BaseProvider` abstract class implementing `attach` in the fixed order with default `extract_usage`/`attach_stream`, and a `Registry`. **Steps 4–5.** Commit `feat: provider abstraction and registry`.
 
 ---
 
-## Task 22: OpenAI provider — request encoding (golden)
+## Task 22: OpenAI provider — request encoding (canonical golden)
 
-Mirrors `./req_llm/lib/req_llm/providers/openai.ex` chat encoding. This is where the **golden-encoding fidelity gate** starts.
+Mirrors `./req_llm/lib/req_llm/providers/openai.ex` chat encoding. Starts the **encoding fidelity gate**.
 
-**Files:**
-- Create: `src/req_llm/providers/openai.cr`
-- Test: `spec/req_llm/providers/openai_spec.cr`
-- Golden: `spec/golden/openai/chat_basic.json`
+**Golden provenance (codex high — no Elixir runtime assumed):** create `spec/golden/openai/chat_basic.json` as a **canonical encoding spec** authored from the upstream encoder source (`providers/openai.ex` + `provider/defaults.ex` body builders) and any checked-in request bodies under `req_llm/test/`. Label it canonical, not parity. If an Elixir runtime later becomes available, regenerate it from the live encoder and diff — but the build does not block on that.
 
-**Step 1: Capture the golden body.** From the Elixir lib, encode a fixed input (`system: "You are terse."`, `user: "Hi"`, `model: gpt-4o-mini`, `temperature: 0.7`) and save the exact request JSON to `spec/golden/openai/chat_basic.json`. (Read `req_llm`'s OpenAI encoder to reproduce the shape: `model`, `messages: [{role, content}]`, `temperature`, etc.)
+**Files:** Create `src/req_llm/providers/openai.cr`; Test `spec/req_llm/providers/openai_spec.cr`; Golden `spec/golden/openai/chat_basic.json`.
+
+**Step 1: Author the golden** for a fixed input (`system: "You are terse."`, `user: "Hi"`, `model: gpt-4o-mini`, `temperature: 0.7`): `{"model","messages":[{role,content}],"temperature"}`.
 
 **Step 2: Failing spec**
 
@@ -918,44 +984,36 @@ Mirrors `./req_llm/lib/req_llm/providers/openai.ex` chat encoding. This is where
 require "../../spec_helper"
 
 describe ReqLLM::Providers::OpenAI do
-  it "encodes a basic chat body matching the golden" do
+  it "encodes a basic chat body matching the canonical golden" do
     ctx = ReqLLM::Context.new([
       ReqLLM::Message.new(ReqLLM::Role::System, "You are terse."),
       ReqLLM::Message.new(ReqLLM::Role::User, "Hi"),
     ])
     model = LLMDB.model("openai:gpt-4o-mini")
-    body = ReqLLM::Providers::OpenAI.new.encode_chat_body(model, ctx, {temperature: 0.7})
-    expected = JSON.parse(File.read("spec/golden/openai/chat_basic.json"))
-    JSON.parse(body).should eq(expected)
+    opts = ReqLLM::Options.validate({temperature: 0.7})
+    body = ReqLLM::Providers::OpenAI.new.encode_chat_body(model, ctx, opts)
+    JSON.parse(body).should eq(JSON.parse(File.read("spec/golden/openai/chat_basic.json")))
   end
 end
 ```
 
-**Step 3: Implement** `encode_chat_body` (and the auth/`attach` wiring) to satisfy the golden. **Steps 4–5.** Commit `feat: OpenAI chat request encoding with golden test`.
+**Step 3: Implement** `encode_chat_body` + auth/`attach` wiring to satisfy the golden. **Steps 4–5.** Commit `feat: OpenAI chat request encoding with golden test`.
 
 ---
 
 ## Task 23: OpenAI provider — response decoding (fixture)
 
-**Files:**
-- Modify: `src/req_llm/providers/openai.cr` (add `decode_response`)
-- Test: `spec/req_llm/providers/openai_decode_spec.cr`
-- Fixture: `spec/fixtures/openai/chat_basic.json` (a real recorded Chat Completions response; hand-author from the OpenAI docs shape if no key available)
+**Files:** Modify `src/req_llm/providers/openai.cr` (add `decode_response`); Test `spec/req_llm/providers/openai_decode_spec.cr`; Fixture `spec/fixtures/openai/chat_basic.json` (real recorded Chat Completions response, or hand-authored from the documented shape).
 
-**Step 1: Failing spec** — feed the fixture body to `decode_response`, assert the resulting `Response.text`, `finish_reason`, and `usage.input_tokens`/`output_tokens`.
-
-**Steps 2–5.** Commit `feat: OpenAI response decoding`.
+**Step 1: Failing spec** — feed the fixture body through `decode_response`, assert `Response.text`, `finish_reason == FinishReason::Stop`, and `usage.input_tokens`/`output_tokens`. **Steps 2–5.** Commit `feat: OpenAI response decoding`.
 
 ---
 
-## Task 24: ReqLLM.generate_text facade — end-to-end via fixture
+## Task 24: ReqLLM.generate_text — end-to-end via fixture
 
-The payoff. Mirrors `./req_llm/lib/req_llm/generation.ex` + the `ReqLLM` facade.
+The payoff. Mirrors `./req_llm/lib/req_llm/generation.ex` + the facade.
 
-**Files:**
-- Create: `src/req_llm/generation.cr`
-- Modify: `src/cr_llm.cr` (define `ReqLLM.generate_text`)
-- Test: `spec/req_llm/generate_text_spec.cr`
+**Files:** Create `src/req_llm/generation.cr`; Modify `src/cr_llm.cr` (`ReqLLM.generate_text`); Test `spec/req_llm/generate_text_spec.cr`.
 
 **Step 1: Failing spec**
 
@@ -964,33 +1022,29 @@ require "../spec_helper"
 
 describe "ReqLLM.generate_text" do
   it "returns text from a recorded fixture without network" do
-    resp = ReqLLM.generate_text("openai:gpt-4o-mini", "Hi",
-      fixture: "chat_basic")
+    resp = ReqLLM.generate_text("openai:gpt-4o-mini", "Hi", fixture: "chat_basic")
     resp.text.should_not be_empty
-    resp.finish_reason.should eq("stop")
+    resp.finish_reason.should eq(ReqLLM::FinishReason::Stop)
   end
 end
 ```
 
-**Step 2: Run red.**
+**Step 2: red. Step 3: Implement** `generate_text`:
+1. `LLMDB.model(spec)` → model; `Registry.fetch(model.provider)` → provider.
+2. Build `Context` from the input; validate opts (`Options.validate`).
+3. `provider.prepare_request(:chat, model, context, opts)` → `HTTP::Request`; `provider.attach(req)` wires steps in the contract order and sets `req.model`.
+4. When `fixture:` given, prepend `Fixture.step(model.provider, name)` so transport is skipped but response steps still decode.
+5. `Pipeline.run(req, ClientAdapter.new)` → `Response`.
 
-**Step 3: Implement** `generate_text`:
-1. `LLMDB.model(spec)` → model.
-2. `Registry.fetch(model.provider)` → provider.
-3. Build `Context` from the string/messages input.
-4. `provider.prepare_request(:chat, model, context, opts)` → `HTTP::Request`, with `attach` wiring `encode_body`/`decode_response`/`error`/`usage` steps.
-5. When `fixture:` is given, prepend `Fixture.step(:openai, name)` (replay) so the adapter is never hit.
-6. `Pipeline.run(req, ClientAdapter.new)` → `Response`.
-
-**Step 4: Run green** — fully offline via the fixture. **Step 5: Commit** `feat: generate_text end-to-end (OpenAI, fixture-backed)`.
+**Step 4: green** — fully offline via the fixture. **Step 5: Commit** `feat: generate_text end-to-end (OpenAI, fixture-backed)`.
 
 ---
 
 ## Task 25: OpenAI tool calls (encode + decode)
 
-**Files:** Modify `src/req_llm/providers/openai.cr`; add golden `spec/golden/openai/chat_tools.json` and fixture `spec/fixtures/openai/chat_tools.json`.
+**Files:** Modify `src/req_llm/providers/openai.cr`; add golden `spec/golden/openai/chat_tools.json`, fixture `spec/fixtures/openai/chat_tools.json`.
 
-TDD: encode a request with a `Tool` (assert `tools`/`tool_choice` shape against golden); decode a tool-call response into `Response.tool_calls`. Commit `feat: OpenAI tool calling`.
+TDD: encode a request with a `Tool` (assert `tools`/`tool_choice` shape against golden, using `Tool#to_json_schema` and `ToolCall#to_wire`); decode a tool-call response into `Response.tool_calls` (via `ToolCall.from_wire`, preserving metadata). Commit `feat: OpenAI tool calling`.
 
 ---
 
@@ -1007,8 +1061,8 @@ Use @superpowers:requesting-code-review here before starting Phase 2.
 
 Expand each into TDD tasks when reached:
 
-1. **SSE parser** (`src/req_llm/streaming/sse.cr`) — incremental `event:`/`data:` framing from an `IO`; spec feeds a `IO::Memory` of raw SSE and asserts parsed events. Mirrors `streaming/sse.ex`.
-2. **Streaming adapter** (`src/req_llm/http/stream_adapter.cr`) — `HTTP::Client` block form yields the body `IO`; produce events behind the same `Request`.
+1. **SSE parser** (`src/req_llm/streaming/sse.cr`) — incremental `event:`/`data:` framing from an `IO`; spec feeds an `IO::Memory` of raw SSE and asserts parsed events. Mirrors `streaming/sse.ex`.
+2. **Streaming adapter** (`src/req_llm/http/stream_adapter.cr`) — `HTTP::Client` block form yields the body `IO`; produce events behind the same `Request`. Fixture replay uses the `"stream"` array from the fixture schema.
 3. **ChunkAccumulator** (`src/req_llm/streaming/accumulator.cr`) — fold `StreamChunk`s into a final `Response`; reassemble tool-call fragments; capture usage from the terminal meta chunk. Mirrors `provider/chunk_accumulator.ex`.
 4. **StreamResponse + fibers/Channel** — producer fiber → bounded `Channel` → `Enumerable` consumer; `join` collapses to `Response`.
 5. **OpenAI + Anthropic stream decode** — `decode_stream_event` per provider; recorded SSE fixtures.
@@ -1016,11 +1070,11 @@ Expand each into TDD tasks when reached:
 
 # Phase 3 — Anthropic provider (roadmap)
 
-Mirrors `providers/anthropic*.ex`. TDD tasks: auth (`x-api-key` + `anthropic-version`), `encode_chat_body` (hoist `system`, content blocks) with golden, `decode_response` (content blocks → parts, thinking) with fixture, tool calls, streaming decode. Register under `:anthropic`. Reuse every shared step.
+Mirrors `providers/anthropic*.ex`. TDD tasks: auth (`x-api-key` + `anthropic-version`), `encode_chat_body` (hoist `system`, content blocks) with canonical golden, `decode_response` (content blocks → parts, thinking) with fixture, tool calls, streaming decode. Register under `:anthropic`. Reuse every shared step and the fixed attach order.
 
 # Phase 4 — Google (Gemini) provider (roadmap)
 
-Mirrors `providers/google*.ex`. TDD tasks: auth (key via query/header), `encode_chat_body` (`contents`/`parts`, `generateContent`) with golden, `decode_response`, `functionDeclarations` tool calls, `streamGenerateContent` decode. Register under `:google`.
+Mirrors `providers/google*.ex`. TDD tasks: auth (key via query/header), `encode_chat_body` (`contents`/`parts`, `generateContent`) with canonical golden, `decode_response`, `functionDeclarations` tool calls, `streamGenerateContent` decode. Register under `:google`.
 
 # Phase 5 — Structured output (roadmap)
 
