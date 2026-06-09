@@ -47,7 +47,19 @@ This is the load-bearing model. It faithfully reproduces Req's plugin pipeline w
 4. **Error steps** transform a raised exception (terminal augmentation only). On any raise during 2–3, fold error steps, then re-raise.
 5. Return `http_resp.decoded || raise Error::API::Response.new("decode produced no response")`.
 
-**Provider `attach` step order is fixed** (codex high — upstream `provider/defaults.ex:574`). `attach(req)` must, in this order: set `Content-Type`/auth headers and store `req.model`; append `Steps.error`; prepend `encode_body` (request step); append `decode_response` (response step); append `Steps.usage`; append the fixture step last. The model lives in `req.model` (typed), so decode/usage/fixture all read it the same way.
+**Provider `attach` step order is fixed** (codex high — upstream `provider/defaults.ex:585-591`). `attach(req)` must, in this order:
+
+1. set `Content-Type`/auth headers and store `req.model`;
+2. set `req.retry` policy (pipeline reads it; not a step);
+3. append `Steps.error` (**response** step — raises on `status >= 400`);
+4. prepend `encode_body` (**request** step — runs first);
+5. append `decode_response` (**response** step);
+6. append `Steps.usage` (**response** step);
+7. wire the **fixture** last (see below).
+
+This yields request-step order `[encode_body, …, fixture-replay]` and response-step order `[error, decode_response, usage, fixture-capture]`. The model lives in `req.model` (typed), so decode/usage/fixture all read it the same way.
+
+**The fixture has two halves** (codex high — reconciles "request step" vs "response step"): a **request-step half** (replay) appended *last* among request steps, which short-circuits with the recorded `HTTP::Response`; and, in record mode only, a **response-step half** (capture) appended *last* among response steps, which writes the raw response to disk. In replay mode only the request-step half is wired; in record mode only the response-step half is wired. The facade never prepends the fixture — `attach` wires it; the facade only supplies the fixture *name*.
 
 ---
 
@@ -605,6 +617,18 @@ end
 require "http/headers"
 require "uri"
 
+# Minimal forward-declared types so this file compiles standalone.
+# Options::Validated is fleshed out in Task 20; RetryPolicy in Task 14.
+module ReqLLM
+  module Options
+    struct Validated
+    end
+  end
+
+  struct RetryPolicy
+  end
+end
+
 module ReqLLM::HTTP
   # A request step returns a Request (continue) or an HTTP::Response (short-circuit
   # into the response phase — e.g. fixture replay). Response/error steps fold pairs.
@@ -669,7 +693,7 @@ module ReqLLM::HTTP
 end
 ```
 
-> Note: `options : Options::Validated?` and `retry : RetryPolicy?` are forward references; define stub types in Task 11 (empty structs) and flesh them out in Tasks 20 / 14 respectively, or guard the requires so this file compiles standalone. Simplest: declare `Options::Validated` and `RetryPolicy` as minimal types here, extend later.
+> Note: the stub `Options::Validated` and `RetryPolicy` at the top of the file are replaced by the real types in Tasks 20 and 14. Keep them empty here so the file compiles standalone.
 
 **Step 4: green. Step 5: Commit** `feat: HTTP::Request/Response with named step pipeline`.
 
@@ -837,8 +861,8 @@ Mirrors `./req_llm/lib/req_llm/step/*.ex` and `provider/defaults.ex`. **Retry li
 **Files:** Create `src/req_llm/retry_policy.cr`, `src/req_llm/steps.cr`; Modify `src/req_llm/http/pipeline.cr` (`perform` → retry loop); Test `spec/req_llm/steps_spec.cr`, `spec/req_llm/retry_spec.cr`.
 
 TDD, each its own red→green→commit:
-- **`RetryPolicy`** — `max_retries`, `base_delay`, predicate `retryable?(status)` (429/5xx). `Response#retry` defaults to a sane policy.
-- **Pipeline `perform` retry loop** — call adapter; if `policy.retryable?(resp.status)` and attempts remain, sleep `Retry-After`-or-backoff and retry. Test with a counter-based `FakeAdapter` that returns 503 twice then 200; assert 3 calls and a final 200. Use @superpowers:condition-based-waiting patterns (poll the counter), keep delays tiny in test via an injected clock/zero base_delay.
+- **`RetryPolicy`** — `max_retries`, `base_delay`, predicate `retryable?(status)` (429/5xx), plus `RetryPolicy.default`. The policy lives on `Request#retry`; the pipeline uses `req.retry || RetryPolicy.default`.
+- **Pipeline `perform` retry loop** — call adapter; if `(req.retry || RetryPolicy.default).retryable?(resp.status)` and attempts remain, sleep `Retry-After`-or-backoff and retry. Test with a counter-based `FakeAdapter` that returns 503 twice then 200; assert 3 calls and a final 200. Use @superpowers:condition-based-waiting patterns (poll the counter), keep delays tiny in test via an injected clock/zero base_delay.
 - **`Steps.error`** — response step: `raise Error::API::Request.new(resp.body, status: resp.status)` when `resp.status >= 400`. Reads `resp.status` directly (the contract preserves it).
 - **`Steps.usage`** — response step: read `resp.decoded.try(&.usage)` already set by decode, or compute from the decoded body + `req.model` pricing; attach `Usage`.
 
@@ -962,7 +986,7 @@ Mirrors `./req_llm/lib/req_llm/provider.ex` and `provider/defaults.ex`. **`BaseP
 
 **Files:** Create `src/req_llm/provider.cr`, `src/req_llm/base_provider.cr`, `src/req_llm/registry.cr`; Test `spec/req_llm/registry_spec.cr` and `spec/req_llm/base_provider_spec.cr`.
 
-**Step 1: Failing specs** — (a) register a stub provider under `:stub`; `Registry.fetch(:stub)` returns it, unknown id raises `Invalid::Parameter`. (b) a stub provider's `attach(req)` produces `req.model` set and step names in the contract order (`[:error]` response steps include error/decode/usage/fixture in the pinned order).
+**Step 1: Failing specs** — (a) register a stub provider under `:stub`; `Registry.fetch(:stub)` returns it, unknown id raises `Invalid::Parameter`. (b) a stub provider's `attach(req)` in **replay** mode sets `req.model` and yields request-step names `[:encode_body, :fixture]` and response-step names `[:error, :decode_response, :usage]`; in **record** mode the response steps end with `:fixture_capture` and the request steps omit `:fixture`. Assert exactly the contract order.
 
 **Step 2–3:** Define `Provider` module (abstract methods from design §4 + Pipeline contract), `BaseProvider` abstract class implementing `attach` in the fixed order with default `extract_usage`/`attach_stream`, and a `Registry`. **Steps 4–5.** Commit `feat: provider abstraction and registry`.
 
@@ -1032,8 +1056,8 @@ end
 **Step 2: red. Step 3: Implement** `generate_text`:
 1. `LLMDB.model(spec)` → model; `Registry.fetch(model.provider)` → provider.
 2. Build `Context` from the input; validate opts (`Options.validate`).
-3. `provider.prepare_request(:chat, model, context, opts)` → `HTTP::Request`; `provider.attach(req)` wires steps in the contract order and sets `req.model`.
-4. When `fixture:` given, prepend `Fixture.step(model.provider, name)` so transport is skipped but response steps still decode.
+3. When `fixture:` is given, set the fixture name on the request before `attach` (e.g. `req.options`/a dedicated field) so `attach` wires the fixture's request-step half (replay) last — do **not** prepend it in the facade (codex high).
+4. `provider.prepare_request(:chat, model, context, opts)` → `HTTP::Request`; `provider.attach(req)` wires steps in the contract order, sets `req.model`, and (replay mode) appends the fixture request-step last so transport is skipped but response steps still decode.
 5. `Pipeline.run(req, ClientAdapter.new)` → `Response`.
 
 **Step 4: green** — fully offline via the fixture. **Step 5: Commit** `feat: generate_text end-to-end (OpenAI, fixture-backed)`.
