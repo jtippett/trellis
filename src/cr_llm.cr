@@ -11,6 +11,8 @@ require "./req_llm/stream_chunk"
 require "./req_llm/response"
 require "./req_llm/http/response"
 require "./req_llm/http/request"
+require "./req_llm/http/adapter"
+require "./req_llm/http/pipeline"
 
 module ReqLLM
   VERSION = "0.1.0"
