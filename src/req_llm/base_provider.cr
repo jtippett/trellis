@@ -30,10 +30,15 @@ module ReqLLM
     # `[:error, :decode_response, :usage, (:fixture_capture)]`.
     def attach(req : HTTP::Request) : HTTP::Request
       # 1. Headers + auth. The model is set by `prepare_request`; attach never
-      #    clobbers it.
+      #    clobbers it. AUTH-SKIP-ON-REPLAY: when the request will be served from
+      #    a recorded fixture no real request is made, so resolving a key would
+      #    be pointless (and would force users to set one for offline runs). Only
+      #    resolve + set the Authorization header when we are NOT replaying.
       req.headers["Content-Type"] = "application/json"
-      api_key = Keys.resolve(default_env_key, explicit_api_key(req))
-      req.headers["Authorization"] = "Bearer #{api_key}"
+      unless Fixture.will_replay?(req, id)
+        api_key = Keys.resolve(default_env_key, explicit_api_key(req))
+        req.headers["Authorization"] = "Bearer #{api_key}"
+      end
 
       # 2. Retry policy (pipeline reads `req.retry || RetryPolicy.default`).
       req.retry ||= RetryPolicy.default
@@ -72,10 +77,13 @@ module ReqLLM
       raise "streaming is not implemented (Phase 2)"
     end
 
-    # The explicit API key, if any, carried on the validated options. Falls back
-    # to the environment via `Keys.resolve`. Overridable by providers.
+    # The explicit API key, if any, carried out-of-band on the request (set by
+    # `generate_text` from the user's `api_key:` arg). It is NOT a generation
+    # option — the options schema has no `:api_key` and would reject it — so it
+    # lives on `req.api_key`, not `req.options`. Falls back to the environment
+    # via `Keys.resolve`. Overridable by providers.
     protected def explicit_api_key(req : HTTP::Request) : String?
-      req.options.try(&.fetch_string?(:api_key))
+      req.api_key
     end
   end
 end

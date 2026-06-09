@@ -46,6 +46,10 @@ module ReqLLM::HTTP
     property options : ReqLLM::Options::Validated?
     property retry : ReqLLM::RetryPolicy?
     property fixture : String? # fixture name; attach wires the fixture step when set
+    # Out-of-band API key (NOT a generation option — the options schema has no
+    # :api_key and would reject it). `generate_text` sets this from the user's
+    # `api_key:` arg; `BaseProvider` reads it when resolving auth.
+    property api_key : String?
 
     getter request_steps : Array({Symbol, RequestStepProc})
     getter response_steps : Array({Symbol, ResponseStepProc})
@@ -57,6 +61,7 @@ module ReqLLM::HTTP
       @context = nil
       @options = nil
       @fixture = nil
+      @api_key = nil
       @retry = nil
       @request_steps = [] of {Symbol, RequestStepProc}
       @response_steps = [] of {Symbol, ResponseStepProc}

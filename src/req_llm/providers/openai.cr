@@ -114,9 +114,20 @@ module ReqLLM::Providers
 
       usage = decode_usage(data["usage"]?)
 
+      # CONTEXT MERGE (upstream `Context.merge_response`): the returned context
+      # is the input messages PLUS the appended assistant reply, so multi-turn
+      # callers can feed `resp.context` straight back in without losing the turn.
+      # Build a fresh Context (dup the input messages) to avoid mutating the
+      # caller's `req.context`.
+      input = req.context
+      merged_messages = input ? input.messages.dup : [] of ReqLLM::Message
+      merged_messages << message
+      merged_tools = input.try(&.tools) || [] of ReqLLM::Tool
+      merged_context = ReqLLM::Context.new(merged_messages, merged_tools)
+
       resp.decoded = ReqLLM::Response.new(
         model: model_name,
-        context: req.context,
+        context: merged_context,
         message: message,
         usage: usage,
         finish_reason: finish_reason,

@@ -55,6 +55,18 @@ module ReqLLM
       ENV["CR_LLM_FIXTURES"]? == "record"
     end
 
+    # Whether this request will be served entirely from a recorded fixture: a
+    # fixture name is set, we are NOT recording, and the fixture file exists on
+    # disk. When true, the replay step short-circuits transport, so no real
+    # request is made and NO API key is required — `BaseProvider#attach` uses
+    # this to skip auth resolution on replay.
+    def will_replay?(req : HTTP::Request, provider : Symbol | String) : Bool
+      name = req.fixture
+      return false unless name
+      return false if record?
+      File.exists?(path(provider, name))
+    end
+
     # The replay half: a named REQUEST step. When the file exists (and we are
     # not recording) it reads + parses the fixture into an `HTTP::Response` and
     # returns it, short-circuiting transport. When the file is missing it passes
