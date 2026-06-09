@@ -1,0 +1,7 @@
+/lib/
+/bin/
+/.shards/
+*.dwarf
+.DS_Store
+/spec/fixtures/**/*.tmp
+.env
