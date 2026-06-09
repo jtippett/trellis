@@ -900,7 +900,7 @@ The test harness, built on the Pipeline contract's short-circuit-then-still-fold
 
 **Behavior:**
 - `Fixture.step(provider, name)` returns a **request step**.
-- **Replay (default):** if `spec/fixtures/<provider>/<name>.json` exists, parse it into a raw `HTTP::Response` (status/headers/body, `decoded == nil`) and **return it** — the pipeline skips transport but still runs `decode_response`/`Steps.error`/`Steps.usage`. No network, no keys.
+- **Replay (default):** if `spec/fixtures/<provider>/<name>.json` exists, parse it into a raw `HTTP::Response` (status/headers/body, `decoded == nil`) and **return it** — the pipeline skips transport but still runs the response steps in contract order `Steps.error`/`decode_response`/`Steps.usage`. No network, no keys.
 - **Record (`ENV["CR_LLM_FIXTURES"]? == "record"`):** do not short-circuit; append a record-only response step **last** (named `:fixture_capture`, per the contract and Task 21) that serializes `{status, headers, body}` to the fixture path before returning the pair unchanged.
 
 **Files:** Create `src/req_llm/fixture.cr`; Test `spec/req_llm/fixture_spec.cr`; Fixtures dir `spec/fixtures/`.
