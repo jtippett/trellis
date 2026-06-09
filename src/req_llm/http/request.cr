@@ -3,10 +3,14 @@ require "uri"
 require "./response" # HTTP::Response, referenced by the step alias return types
 
 # Minimal forward-declared types so this file compiles standalone. Each is
-# reopened with real fields/methods later (Crystal allows reopening an empty
-# struct): Options::Validated in Task 20, RetryPolicy in Task 14, LLMDB::Model
-# in Task 17. The manifest (src/cr_llm.cr) must require content_part, message,
-# context, and response BEFORE http/request so the real types win at link time.
+# reopened with real fields/methods by a later unit. Crystal collects type
+# definitions whole-program and MERGES reopened ones regardless of require
+# order, so the safety invariant is NOT require ordering — it is that each
+# reopening MUST use the same kind declared here:
+#   - Options::Validated => reopen as `struct` (Task 20)
+#   - RetryPolicy        => reopen as `struct` (Task 14)
+#   - LLMDB::Model       => reopen as `class`  (Task 17)
+# A `class` vs `struct` mismatch on reopening is a hard compile error.
 module ReqLLM
   module Options
     struct Validated
