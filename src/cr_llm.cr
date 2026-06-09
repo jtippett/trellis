@@ -17,10 +17,8 @@ require "./req_llm/http/pipeline"
 require "./req_llm/retry_policy"
 require "./req_llm/steps"
 require "./req_llm/fixture"
+require "./llmdb/spec"
 
 module ReqLLM
   VERSION = "0.1.0"
-end
-
-module LLMDB
 end
