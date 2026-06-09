@@ -37,13 +37,14 @@ This is the load-bearing model. It faithfully reproduces Req's plugin pipeline w
 - `model : LLMDB::Model?`, `context : ReqLLM::Context?`, `operation : Symbol` (default `:chat`)
 - `options : ReqLLM::Options::Validated?` (typed, validated request options)
 - `retry : ReqLLM::RetryPolicy?` (read by the pipeline, not a step)
+- `fixture : String?` (fixture name; `attach` wires the fixture step when set)
 - `request_steps`, `response_steps`, `error_steps` (named)
 
 **`Pipeline.run(req, adapter)` order** (codex blockers 2, 3, 4):
 
 1. **Request steps** run in order. A step returns either a `Request` (continue) or an `HTTP::Response` (short-circuit — e.g. fixture replay supplies a raw response). On short-circuit, **skip transport but still run response steps** (so decode + usage execute on the fixture). Upstream fixture replay behaves exactly this way (`req_llm/test/support/fixture.ex:112`).
 2. **Transport with retry** (only if not short-circuited): the pipeline calls `adapter.call(req)` inside a retry loop governed by `req.retry` — retry on status 429/5xx honoring `Retry-After`, capped with backoff. Retry lives **in the pipeline around the adapter**, never in an error step (an error step has no adapter to re-run).
-3. **Response steps** fold `(req, http_resp) -> {req, http_resp}` in order: provider `decode_response` sets `http_resp.decoded`; `Steps.error` raises `Error::API::Request` when `http_resp.status >= 400`; `Steps.usage` reads the decoded body and attaches `Usage`.
+3. **Response steps** fold `(req, http_resp) -> {req, http_resp}` in the fixed order `[:error, :decode_response, :usage]` (matching upstream `defaults.ex:585-591` and the Task 21 assertions): `Steps.error` raises `Error::API::Request` when `http_resp.status >= 400` (so a 4xx/5xx body is never decoded); then provider `decode_response` sets `http_resp.decoded`; then `Steps.usage` reads the decoded body and attaches `Usage`. In record mode `:fixture_capture` is appended after these.
 4. **Error steps** transform a raised exception (terminal augmentation only). On any raise during 2–3, fold error steps, then re-raise.
 5. Return `http_resp.decoded || raise Error::API::Response.new("decode produced no response")`.
 
@@ -616,9 +617,13 @@ end
 ```crystal
 require "http/headers"
 require "uri"
+require "./response" # HTTP::Response, referenced by the step alias return types
 
-# Minimal forward-declared types so this file compiles standalone.
-# Options::Validated is fleshed out in Task 20; RetryPolicy in Task 14.
+# Minimal forward-declared types so this file compiles standalone. Each is
+# reopened with real fields/methods later (Crystal allows reopening an empty
+# struct): Options::Validated in Task 20, RetryPolicy in Task 14, LLMDB::Model
+# in Task 17. The manifest (src/cr_llm.cr) must require content_part, message,
+# context, and response BEFORE http/request so the real types win at link time.
 module ReqLLM
   module Options
     struct Validated
@@ -626,6 +631,11 @@ module ReqLLM
   end
 
   struct RetryPolicy
+  end
+end
+
+module LLMDB
+  class Model
   end
 end
 
@@ -648,6 +658,7 @@ module ReqLLM::HTTP
     property operation : Symbol
     property options : ReqLLM::Options::Validated?
     property retry : ReqLLM::RetryPolicy?
+    property fixture : String? # fixture name; attach wires the fixture step when set
 
     getter request_steps : Array({Symbol, RequestStepProc})
     getter response_steps : Array({Symbol, ResponseStepProc})
@@ -658,6 +669,7 @@ module ReqLLM::HTTP
       @model = nil
       @context = nil
       @options = nil
+      @fixture = nil
       @retry = nil
       @request_steps = [] of {Symbol, RequestStepProc}
       @response_steps = [] of {Symbol, ResponseStepProc}
@@ -889,7 +901,7 @@ The test harness, built on the Pipeline contract's short-circuit-then-still-fold
 **Behavior:**
 - `Fixture.step(provider, name)` returns a **request step**.
 - **Replay (default):** if `spec/fixtures/<provider>/<name>.json` exists, parse it into a raw `HTTP::Response` (status/headers/body, `decoded == nil`) and **return it** — the pipeline skips transport but still runs `decode_response`/`Steps.error`/`Steps.usage`. No network, no keys.
-- **Record (`ENV["CR_LLM_FIXTURES"]? == "record"`):** do not short-circuit; append an *early* response step that serializes `{status, headers, body}` to the fixture path before returning the pair unchanged.
+- **Record (`ENV["CR_LLM_FIXTURES"]? == "record"`):** do not short-circuit; append a record-only response step **last** (named `:fixture_capture`, per the contract and Task 21) that serializes `{status, headers, body}` to the fixture path before returning the pair unchanged.
 
 **Files:** Create `src/req_llm/fixture.cr`; Test `spec/req_llm/fixture_spec.cr`; Fixtures dir `spec/fixtures/`.
 
@@ -929,7 +941,7 @@ end
 
 ## Task 17: LLMDB::Model
 
-Mirrors `LLMDB.Model`. Fields: `provider` (Symbol), `id`, `name`, `capabilities`, `limit` (context/output), `modalities`, `cost` (input/output/cached). `JSON::Serializable` for loading vendored data.
+Mirrors `LLMDB.Model`. Define as a **`class`** (reopening the empty stub from Task 11). Fields: `provider` (Symbol), `id`, `name`, `capabilities`, `limit` (context/output), `modalities`, `cost` (input/output/cached). `JSON::Serializable` for loading vendored data.
 
 **Files:** Create `src/llmdb/model.cr`; Test alongside.
 
@@ -1056,8 +1068,8 @@ end
 **Step 2: red. Step 3: Implement** `generate_text`:
 1. `LLMDB.model(spec)` → model; `Registry.fetch(model.provider)` → provider.
 2. Build `Context` from the input; validate opts (`Options.validate`).
-3. When `fixture:` is given, set the fixture name on the request before `attach` (e.g. `req.options`/a dedicated field) so `attach` wires the fixture's request-step half (replay) last — do **not** prepend it in the facade (codex high).
-4. `provider.prepare_request(:chat, model, context, opts)` → `HTTP::Request`; `provider.attach(req)` wires steps in the contract order, sets `req.model`, and (replay mode) appends the fixture request-step last so transport is skipped but response steps still decode.
+3. `provider.prepare_request(:chat, model, context, opts)` → `HTTP::Request`.
+4. When `fixture:` is given, set the fixture name on the now-existing request (a dedicated `req.fixture : String?` field) — do **not** prepend a step in the facade (codex high). Then call `provider.attach(req)`, which wires steps in the contract order, sets `req.model`, and (replay mode) appends the fixture request-step half last so transport is skipped but response steps still decode.
 5. `Pipeline.run(req, ClientAdapter.new)` → `Response`.
 
 **Step 4: green** — fully offline via the fixture. **Step 5: Commit** `feat: generate_text end-to-end (OpenAI, fixture-backed)`.
