@@ -7,6 +7,8 @@ require "./registry"
 require "./http/request"
 require "./http/pipeline"
 require "./http/client_adapter"
+require "./streaming/stream_response"
+require "./streaming/stream_adapter"
 require "../llmdb"
 
 module ReqLLM
@@ -50,5 +52,41 @@ module ReqLLM
     provider.attach(req)
 
     HTTP::Pipeline.run(req, HTTP::ClientAdapter.new)
+  end
+
+  # `ReqLLM.stream_text` — the streaming entry point. The front half mirrors
+  # `generate_text` (resolve model + provider, normalize the prompt into a
+  # Context, validate options, split out the out-of-band `fixture:`/`api_key:`),
+  # but instead of running the response-folding pipeline it builds a streaming
+  # request via `provider.attach_stream` and returns a `StreamResponse` whose
+  # producer fiber drives `StreamAdapter` (live transport or offline fixture
+  # replay), emitting decoded `StreamChunk`s as they arrive.
+  #
+  # The model's catalog pricing is threaded into the `StreamResponse` so a
+  # subsequent `join` attaches cost the way `Steps.usage` does for the
+  # non-streaming path (the streaming path skips that step). When `fixture:`
+  # names a recorded file the run is fully offline and needs no API key (auth is
+  # skipped on replay, same as `generate_text`).
+  def self.stream_text(spec : String, prompt : String | Context, *,
+                       fixture : String? = nil, api_key : String? = nil,
+                       **opts) : StreamResponse
+    model = LLMDB.model(spec)
+    provider = Registry.fetch(model.provider)
+
+    context = case prompt
+              in String  then Context.new([Message.new(Role::User, prompt)])
+              in Context then prompt
+              end
+
+    validated = Options.validate(opts)
+
+    req = provider.prepare_request(:chat, model, context, validated)
+    req.fixture = fixture if fixture
+    req.api_key = api_key if api_key
+    provider.attach_stream(req)
+
+    StreamResponse.new(model.key, context, cost: model.cost) do |emit|
+      StreamAdapter.drive(req, provider, emit)
+    end
   end
 end

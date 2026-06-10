@@ -34,11 +34,7 @@ module ReqLLM
       #    a recorded fixture no real request is made, so resolving a key would
       #    be pointless (and would force users to set one for offline runs). Only
       #    resolve + set the Authorization header when we are NOT replaying.
-      req.headers["Content-Type"] = "application/json"
-      unless Fixture.will_replay?(req, id)
-        api_key = Keys.resolve(default_env_key, explicit_api_key(req))
-        req.headers["Authorization"] = "Bearer #{api_key}"
-      end
+      apply_common_headers(req)
 
       # 2. Retry policy (pipeline reads `req.retry || RetryPolicy.default`).
       req.retry ||= RetryPolicy.default
@@ -76,6 +72,26 @@ module ReqLLM
     # Streaming is Phase 2; concrete providers will override.
     def attach_stream(req : HTTP::Request) : HTTP::Request
       raise "streaming is not implemented (Phase 2)"
+    end
+
+    # Default: providers that support streaming override this. Mirrors the
+    # `attach_stream` Phase-2 stub — keeps the abstract contract satisfied for
+    # non-streaming providers.
+    def decode_stream_event(event : ReqLLM::SSE::Event) : Array(ReqLLM::StreamChunk)
+      raise "decode_stream_event is not implemented for #{id}"
+    end
+
+    # Content-Type + Authorization header setup, shared by `attach` (the
+    # non-streaming pipeline) and `attach_stream`. AUTH-SKIP-ON-REPLAY: when the
+    # request will be served from a recorded fixture no real request is made, so
+    # resolving a key would be pointless (and would force users to set one for
+    # offline runs). Only resolve + set Authorization when we are NOT replaying.
+    protected def apply_common_headers(req : HTTP::Request) : Nil
+      req.headers["Content-Type"] = "application/json"
+      unless Fixture.will_replay?(req, id)
+        api_key = Keys.resolve(default_env_key, explicit_api_key(req))
+        req.headers["Authorization"] = "Bearer #{api_key}"
+      end
     end
 
     # The explicit API key, if any, carried out-of-band on the request (set by

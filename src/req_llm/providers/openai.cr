@@ -68,8 +68,14 @@ module ReqLLM::Providers
     #                     `maybe_put` keeps a non-nil `false`).
     #   * `tools`       — omitted entirely when the list is empty (upstream guards
     #                     `tools != []`).
+    # `stream` overrides the option-derived flag: `attach_stream` passes
+    # `stream: true`, which both flips the wire `stream` field and emits
+    # `stream_options: {include_usage: true}` so a final usage frame arrives.
+    # When `stream` is nil (the default, used by the non-streaming path) the
+    # value comes from the options, preserving existing behaviour exactly.
     def encode_chat_body(model : LLMDB::Model, context : ReqLLM::Context,
-                         opts : ReqLLM::Options::Validated) : String
+                         opts : ReqLLM::Options::Validated,
+                         *, stream : Bool? = nil) : String
       body = {} of String => JSON::Any
       body["model"] = JSON::Any.new(model.id)
       body["messages"] = JSON::Any.new(encode_messages(context.messages))
@@ -108,8 +114,15 @@ module ReqLLM::Providers
         body["stop"] = JSON::Any.new(stop.map { |s| JSON::Any.new(s) })
       end
 
-      # stream is always present (value-based: the materialized default is false).
-      body["stream"] = JSON::Any.new(opts.fetch_bool(:stream))
+      # stream is always present (value-based: the materialized default is
+      # false). `attach_stream` forces it true and adds stream_options so the
+      # API emits a terminal usage frame (include_usage).
+      stream_flag = stream.nil? ? opts.fetch_bool(:stream) : stream
+      body["stream"] = JSON::Any.new(stream_flag)
+      if stream_flag
+        body["stream_options"] = JSON::Any.new(
+          {"include_usage" => JSON::Any.new(true)})
+      end
 
       # tools omitted entirely when empty (upstream guards `tools != []`); when
       # present, each Tool renders to the OpenAI function shape via to_json_schema.
@@ -121,6 +134,24 @@ module ReqLLM::Providers
       end
 
       body.to_json
+    end
+
+    # Configure a STREAMING chat request. Shares header/auth setup with the
+    # non-streaming `attach` (via `apply_common_headers`, which honours
+    # AUTH-SKIP-ON-REPLAY so a fixture replay needs no key), but instead of
+    # wiring pipeline steps it just encodes the body with the stream flags set:
+    # `stream: true` + `stream_options.include_usage`. The request URL is already
+    # `<base>/chat/completions` from `prepare_request`. The producer fiber +
+    # `StreamAdapter` drive transport and decoding; no Steps.error/decode/usage
+    # are wired (the adapter handles non-2xx; the accumulator folds chunks).
+    def attach_stream(req : HTTP::Request) : HTTP::Request
+      model = req.model.as(LLMDB::Model)
+      context = req.context.as(ReqLLM::Context)
+      opts = req.options.as(ReqLLM::Options::Validated)
+
+      apply_common_headers(req)
+      req.body = encode_chat_body(model, context, opts, stream: true)
+      req
     end
 
     # Response step: decode a Chat Completions JSON response into a semantic

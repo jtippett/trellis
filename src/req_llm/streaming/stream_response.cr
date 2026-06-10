@@ -81,11 +81,17 @@ module ReqLLM
     getter error : Exception?
 
     # `model` is the model id string; `context` is the input context threaded
-    # into the joined `Response`. `capacity` bounds the channel buffer. The
-    # producer block receives an `emit` proc (`StreamChunk ->`).
+    # into the joined `Response`. `capacity` bounds the channel buffer. `cost`
+    # is the model's catalog pricing: the streaming path does NOT run
+    # `Steps.usage`, so `join` applies cost from this pricing to the final
+    # `Response`'s usage (mirroring `Steps.usage`). Nil leaves cost unset (an
+    # unknown cost, not a misleading $0). The producer block receives an `emit`
+    # proc (`StreamChunk ->`).
     def initialize(@model : String, @context : Context? = nil,
                    *, capacity : Int32 = DEFAULT_CAPACITY,
+                   cost : LLMDB::Model::Cost? = nil,
                    &producer : (StreamChunk ->) ->)
+      @cost = cost
       @channel = Channel(StreamChunk).new(capacity)
       @error = nil
       @consumed = false
@@ -109,7 +115,21 @@ module ReqLLM
     def join : Response
       acc = ChunkAccumulator.new
       each { |chunk| acc << chunk }
-      acc.finish(@model, @context)
+      response = acc.finish(@model, @context)
+
+      # Thread cost the way Steps.usage does for the non-streaming path: the
+      # accumulator only sets token counts, so compute per-token cost from the
+      # model's catalog pricing here. Usage is a value type — mutate the local
+      # copy and write it back. A nil pricing (or unpriced model) leaves cost
+      # nil (unknown, not free).
+      if cost = @cost
+        if usage = response.usage
+          usage.cost = usage.cost(cost)
+          response.usage = usage
+        end
+      end
+
+      response
     end
 
     # A lazy `Iterator(String)` over just the `:content` chunk text, in order.

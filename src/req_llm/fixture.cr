@@ -26,6 +26,14 @@ module ReqLLM
   #
   #   { "status": 200, "headers": {"content-type": "..."}, "body": "<raw>" }
   #
+  # Streaming fixtures add a `"stream"` field — the recorded SSE frames, either
+  # an array of raw frame strings (each like `"data: {...}\n\n"`) or a single
+  # SSE text blob. On replay the frames are concatenated and fed through the
+  # real `SSE.each_event` parser, so a recorded stream exercises the same
+  # decode path as a live one:
+  #
+  #   { "stream": ["data: {...}\n\n", "data: [DONE]\n\n"] }
+  #
   # Headers round-trip: `HTTP::Headers` may hold multiple values per key; on
   # capture we join them with ", " (RFC 7230 combined-field-value form) into a
   # single JSON string, and on replay set that single string back as one value.
@@ -140,6 +148,28 @@ module ReqLLM
     rescue ex : JSON::ParseException | TypeCastError | KeyError
       raise Error::Invalid::Parameter.new(
         "malformed fixture #{file}: #{ex.message}")
+    end
+
+    # Load a STREAMING fixture's recorded SSE frames as an array of raw strings.
+    # The `"stream"` field may be either an array of frame strings or a single
+    # SSE blob; both normalize to an array the caller concatenates and feeds
+    # through `SSE.each_event`. A malformed/absent `stream` field raises a typed
+    # `ReqLLM::Error` naming the path (matching `load_response`).
+    def load_stream(file : String) : Array(String)
+      parsed = JSON.parse(File.read(file)).as_h
+      stream = parsed["stream"]
+      case raw = stream.raw
+      when Array
+        stream.as_a.map(&.as_s)
+      when String
+        [stream.as_s]
+      else
+        raise Error::Invalid::Parameter.new(
+          "malformed streaming fixture #{file}: \"stream\" must be an array or string")
+      end
+    rescue ex : JSON::ParseException | TypeCastError | KeyError
+      raise Error::Invalid::Parameter.new(
+        "malformed streaming fixture #{file}: #{ex.message}")
     end
   end
 end

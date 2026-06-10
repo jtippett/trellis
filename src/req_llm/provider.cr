@@ -1,5 +1,7 @@
 require "./error"
 require "./usage"
+require "./stream_chunk"
+require "./streaming/sse"
 require "./http/request"
 require "./http/response"
 
@@ -49,5 +51,10 @@ module ReqLLM
     # Configure a streaming request. Has a default in `BaseProvider`
     # (streaming is Phase 2).
     abstract def attach_stream(req : HTTP::Request) : HTTP::Request
+
+    # Decode ONE streaming SSE event into zero-or-more `StreamChunk`s. PURE: no
+    # IO/concurrency. The stream adapter drives this for every framed event.
+    # Has a raising default in `BaseProvider` for non-streaming providers.
+    abstract def decode_stream_event(event : ReqLLM::SSE::Event) : Array(ReqLLM::StreamChunk)
   end
 end
