@@ -82,6 +82,32 @@ module ReqLLM::Providers
         body["max_tokens"] = JSON::Any.new(max_tokens.to_i64)
       end
 
+      # Sampling params (upstream `add_basic_options`): value-based, emitted only
+      # when set. Wire keys match OpenAI exactly.
+      if top_p = opts.fetch_float?(:top_p)
+        body["top_p"] = JSON::Any.new(top_p)
+      end
+
+      if frequency_penalty = opts.fetch_float?(:frequency_penalty)
+        body["frequency_penalty"] = JSON::Any.new(frequency_penalty)
+      end
+
+      if presence_penalty = opts.fetch_float?(:presence_penalty)
+        body["presence_penalty"] = JSON::Any.new(presence_penalty)
+      end
+
+      if seed = opts.fetch_int?(:seed)
+        body["seed"] = JSON::Any.new(seed.to_i64)
+      end
+
+      # `stop` accepts a single String or an Array(String); render each shape.
+      case stop = opts.fetch_stop
+      when String
+        body["stop"] = JSON::Any.new(stop)
+      when Array(String)
+        body["stop"] = JSON::Any.new(stop.map { |s| JSON::Any.new(s) })
+      end
+
       # stream is always present (value-based: the materialized default is false).
       body["stream"] = JSON::Any.new(opts.fetch_bool(:stream))
 

@@ -70,6 +70,56 @@ describe ReqLLM::Providers::OpenAI do
 
       parsed.as_h.has_key?("tool_choice").should be_false
     end
+
+    it "encodes sampling params matching the canonical golden" do
+      ctx = ReqLLM::Context.new([
+        ReqLLM::Message.new(ReqLLM::Role::System, "You are terse."),
+        ReqLLM::Message.new(ReqLLM::Role::User, "Hi"),
+      ])
+      model = LLMDB.model("openai:gpt-4o-mini")
+      opts = ReqLLM::Options.validate({
+        temperature:       0.7,
+        top_p:             0.9,
+        frequency_penalty: 0.5,
+        presence_penalty:  0.2,
+        seed:              42,
+        stop:              ["END"],
+      })
+      body = ReqLLM::Providers::OpenAI.new.encode_chat_body(model, ctx, opts)
+
+      JSON.parse(body).should eq(JSON.parse(File.read("spec/golden/openai/chat_sampling.json")))
+    end
+
+    it "omits sampling params when unset" do
+      ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "Hi")])
+      model = LLMDB.model("openai:gpt-4o-mini")
+      opts = ReqLLM::Options.validate(NamedTuple.new)
+      parsed = JSON.parse(ReqLLM::Providers::OpenAI.new.encode_chat_body(model, ctx, opts)).as_h
+
+      parsed.has_key?("top_p").should be_false
+      parsed.has_key?("frequency_penalty").should be_false
+      parsed.has_key?("presence_penalty").should be_false
+      parsed.has_key?("seed").should be_false
+      parsed.has_key?("stop").should be_false
+    end
+
+    it "encodes stop as a String scalar" do
+      ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "Hi")])
+      model = LLMDB.model("openai:gpt-4o-mini")
+      opts = ReqLLM::Options.validate({stop: "END"})
+      parsed = JSON.parse(ReqLLM::Providers::OpenAI.new.encode_chat_body(model, ctx, opts))
+
+      parsed["stop"].should eq(JSON::Any.new("END"))
+    end
+
+    it "encodes stop as an Array(String)" do
+      ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "Hi")])
+      model = LLMDB.model("openai:gpt-4o-mini")
+      opts = ReqLLM::Options.validate({stop: ["END", "STOP"]})
+      parsed = JSON.parse(ReqLLM::Providers::OpenAI.new.encode_chat_body(model, ctx, opts))
+
+      parsed["stop"].should eq(JSON::Any.new([JSON::Any.new("END"), JSON::Any.new("STOP")]))
+    end
   end
 
   describe "registration" do

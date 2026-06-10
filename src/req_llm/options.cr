@@ -46,11 +46,12 @@ module ReqLLM
 
     # Union of every value type a validated option may hold. Add to this when a
     # new `FieldSpec` type tag is introduced.
-    alias Value = Float64 | Int32 | Bool | String | Symbol | Array(Tool) | Nil
+    alias Value = Float64 | Int32 | Bool | String | Symbol | Array(String) | Array(Tool) | Nil
 
     # Specification for a single option key.
     #
-    # `type` is a tag in `{:float, :int, :bool, :string, :symbol, :tools}`.
+    # `type` is a tag in `{:float, :int, :bool, :string, :symbol, :tools,
+    # :string_or_string_array}`.
     # `range` (numeric) is checked for `:float`/`:int`. `default` is applied when
     # the key is absent (a `nil` default means "no value"). `required` raises
     # when the key is absent.
@@ -117,6 +118,22 @@ module ReqLLM
       def fetch_tools(key : Symbol = :tools) : Array(Tool)
         v = @values[key]?
         v.is_a?(Array(Tool)) ? v : [] of Tool
+      end
+
+      # Returns the raw String-array value, or nil when absent/other-typed.
+      def fetch_string_array?(key : Symbol) : Array(String)?
+        @values[key]?.as?(Array(String))
+      end
+
+      # Returns a `stop` value that may be a single `String` or an
+      # `Array(String)` (OpenAI accepts both), or nil when absent.
+      def fetch_stop(key : Symbol = :stop) : String | Array(String) | Nil
+        v = @values[key]?
+        case v
+        when String        then v
+        when Array(String) then v
+        else                    nil
+        end
       end
     end
 
@@ -193,6 +210,12 @@ module ReqLLM
           value.is_a?(Symbol) ? value : raise(type_error(key, "symbol", value))
         when :tools
           value.is_a?(Array(Tool)) ? value : raise(type_error(key, "Array(Tool)", value))
+        when :string_or_string_array
+          case value
+          when String        then value
+          when Array(String) then value
+          else                    raise type_error(key, "String or Array(String)", value)
+          end
         else
           raise Error::Invalid::Parameter.new(
             "unknown option type #{spec.type.inspect} for #{key.inspect}")
@@ -241,10 +264,15 @@ module ReqLLM
     # The universal core generation schema (the subset relevant to Phase 1).
     # Providers extend this via `base_schema.merge(...)`.
     BASE_SCHEMA = schema({
-      temperature: {type: :float, range: 0.0..2.0},
-      max_tokens:  {type: :int, default: nil},
-      tools:       {type: :tools, default: [] of ReqLLM::Tool},
-      stream:      {type: :bool, default: false},
+      temperature:       {type: :float, range: 0.0..2.0},
+      max_tokens:        {type: :int, default: nil},
+      top_p:             {type: :float, range: 0.0..1.0},
+      frequency_penalty: {type: :float, range: -2.0..2.0},
+      presence_penalty:  {type: :float, range: -2.0..2.0},
+      seed:              {type: :int},
+      stop:              {type: :string_or_string_array},
+      tools:             {type: :tools, default: [] of ReqLLM::Tool},
+      stream:            {type: :bool, default: false},
     })
 
     # Returns the base generation schema.

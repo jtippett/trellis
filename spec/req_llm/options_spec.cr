@@ -46,6 +46,55 @@ describe ReqLLM::Options do
     end
   end
 
+  describe "sampling params" do
+    it "accepts valid sampling values" do
+      v = ReqLLM::Options.validate({
+        top_p:             0.9,
+        frequency_penalty: 0.5,
+        presence_penalty:  0.2,
+        seed:              42,
+      })
+      v.fetch_float?(:top_p).should eq(0.9)
+      v.fetch_float?(:frequency_penalty).should eq(0.5)
+      v.fetch_float?(:presence_penalty).should eq(0.2)
+      v.fetch_int?(:seed).should eq(42)
+    end
+
+    it "raises on out-of-range top_p" do
+      expect_raises(ReqLLM::Error::Invalid::Parameter, /top_p/) do
+        ReqLLM::Options.validate({top_p: 1.5})
+      end
+    end
+
+    it "raises on out-of-range frequency_penalty" do
+      expect_raises(ReqLLM::Error::Invalid::Parameter, /frequency_penalty/) do
+        ReqLLM::Options.validate({frequency_penalty: 3.0})
+      end
+    end
+
+    it "raises on out-of-range presence_penalty" do
+      expect_raises(ReqLLM::Error::Invalid::Parameter, /presence_penalty/) do
+        ReqLLM::Options.validate({presence_penalty: -3.0})
+      end
+    end
+
+    it "accepts stop as a String" do
+      v = ReqLLM::Options.validate({stop: "END"})
+      v.fetch_stop(:stop).should eq("END")
+    end
+
+    it "accepts stop as an Array(String)" do
+      v = ReqLLM::Options.validate({stop: ["END", "STOP"]})
+      v.fetch_stop(:stop).should eq(["END", "STOP"])
+    end
+
+    it "rejects stop of the wrong type" do
+      expect_raises(ReqLLM::Error::Invalid::Parameter, /stop/) do
+        ReqLLM::Options.validate({stop: 42})
+      end
+    end
+  end
+
   describe "schema extension" do
     it "merges provider-specific keys onto the base schema" do
       schema = ReqLLM::Options.base_schema.merge(
