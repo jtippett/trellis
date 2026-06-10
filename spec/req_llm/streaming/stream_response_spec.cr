@@ -1,5 +1,26 @@
 require "../../spec_helper"
 
+# Runs `block` in a fiber and FAILS FAST if it doesn't finish within `timeout`,
+# so a deadlock regression in StreamResponse fails the spec instead of hanging
+# CI forever (the consumer paths all block on Channel#receive?). Re-raises any
+# exception the block raised, so `expect_raises` still works when wrapped.
+private def within(timeout = 2.seconds, &block)
+  done = Channel(Exception?).new(1)
+  spawn do
+    block.call
+    done.send(nil)
+  rescue ex
+    done.send(ex)
+  end
+
+  select
+  when err = done.receive
+    raise err if err
+  when timeout(timeout)
+    fail("operation did not complete within #{timeout} (possible deadlock)")
+  end
+end
+
 # Builds a content chunk carrying text.
 private def content(text : String) : ReqLLM::StreamChunk
   ReqLLM::StreamChunk.text(text)
@@ -33,24 +54,25 @@ describe ReqLLM::StreamResponse do
       chunks = [content("Hel"), content("lo"), content("!"), meta("stop", 3, 5)]
       stream = fixed_stream(chunks)
 
-      received = stream.to_a
-
-      received.size.should eq(4)
-      received[0].text.should eq("Hel")
-      received[1].text.should eq("lo")
-      received[2].text.should eq("!")
-      received[3].type.should eq(ReqLLM::ChunkType::Meta)
+      within do
+        received = stream.to_a
+        received.size.should eq(4)
+        received[0].text.should eq("Hel")
+        received[1].text.should eq("lo")
+        received[2].text.should eq("!")
+        received[3].type.should eq(ReqLLM::ChunkType::Meta)
+      end
     end
 
     it "closes cleanly with no producer error and does not hang" do
       stream = fixed_stream([content("a")])
-      stream.each { |_| }
+      within { stream.each { |_| } }
       stream.error.should be_nil
     end
 
     it "raises on a second consumption (single-consume contract)" do
       stream = fixed_stream([content("a")])
-      stream.each { |_| }
+      within { stream.each { |_| } }
 
       expect_raises(ReqLLM::StreamResponse::AlreadyConsumed) do
         stream.each { |_| }
@@ -63,25 +85,27 @@ describe ReqLLM::StreamResponse do
       chunks = [content("Hel"), content("lo"), content("!"), meta("stop", 7, 11)]
       stream = fixed_stream(chunks)
 
-      response = stream.join
-
-      response.text.should eq("Hello!")
-      response.finish_reason.should eq(ReqLLM::FinishReason::Stop)
-      response.usage.try(&.input_tokens).should eq(7)
-      response.usage.try(&.output_tokens).should eq(11)
-      response.model.should eq("test:model")
+      within do
+        response = stream.join
+        response.text.should eq("Hello!")
+        response.finish_reason.should eq(ReqLLM::FinishReason::Stop)
+        response.usage.try(&.input_tokens).should eq(7)
+        response.usage.try(&.output_tokens).should eq(11)
+        response.model.should eq("test:model")
+      end
     end
 
     it "threads the input context into the merged Response context" do
       ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "hi")])
       stream = fixed_stream([content("yo"), meta("stop", 1, 1)], context: ctx)
 
-      response = stream.join
-
-      response.context.should_not be_nil
-      msgs = response.context.not_nil!.messages
-      msgs.size.should eq(2)
-      msgs.last.role.should eq(ReqLLM::Role::Assistant)
+      within do
+        response = stream.join
+        response.context.should_not be_nil
+        msgs = response.context.not_nil!.messages
+        msgs.size.should eq(2)
+        msgs.last.role.should eq(ReqLLM::Role::Assistant)
+      end
     end
   end
 
@@ -90,7 +114,7 @@ describe ReqLLM::StreamResponse do
       chunks = [content("a"), meta("stop", 1, 1), content("b"), content("c")]
       stream = fixed_stream(chunks)
 
-      stream.text_stream.to_a.should eq(["a", "b", "c"])
+      within { stream.text_stream.to_a.should eq(["a", "b", "c"]) }
     end
   end
 
@@ -103,7 +127,7 @@ describe ReqLLM::StreamResponse do
 
       seen = [] of String
       expect_raises(Exception, "boom from producer") do
-        stream.each { |c| seen << (c.text || "") }
+        within { stream.each { |c| seen << (c.text || "") } }
       end
       # The chunk emitted before the raise still reached the consumer.
       seen.should eq(["partial"])
@@ -117,7 +141,7 @@ describe ReqLLM::StreamResponse do
       end
 
       expect_raises(Exception, "join boom") do
-        stream.join
+        within { stream.join }
       end
     end
 
@@ -128,7 +152,7 @@ describe ReqLLM::StreamResponse do
       end
 
       expect_raises(Exception, "text boom") do
-        stream.text_stream.to_a
+        within { stream.text_stream.to_a }
       end
     end
   end
@@ -143,10 +167,12 @@ describe ReqLLM::StreamResponse do
       end
 
       first = nil.as(String?)
-      stream.each do |chunk|
-        first = chunk.text
-        stream.cancel
-        break
+      within do
+        stream.each do |chunk|
+          first = chunk.text
+          stream.cancel
+          break
+        end
       end
 
       first.should eq("0")
