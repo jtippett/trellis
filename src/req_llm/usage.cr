@@ -43,20 +43,29 @@ module ReqLLM
     end
 
     # Cache-aware dollar cost from a catalog `Cost` struct (USD per 1M tokens),
-    # the faithful per-exchange cost. Mirrors `ReqLLM.Billing` (billing.ex):
-    # OpenAI-style `cached_tokens` are a SUBSET of `input_tokens`, so the
-    # non-cached portion `(input_tokens - cached_tokens)` bills at the input
-    # rate while the cached portion bills at the cheaper `cache_read` rate;
-    # `output_tokens` bill at the output rate. When the catalog has no
-    # `cache_read` rate the cached portion falls back to the input rate, which
-    # collapses the formula to `input_tokens * input_rate` (no carve-out).
+    # modelled in the spirit of `ReqLLM.Billing` (billing.ex): OpenAI-style
+    # `cached_tokens` are a SUBSET of `input_tokens`, so the non-cached portion
+    # `(input_tokens - cached_tokens)` bills at the input rate while the cached
+    # portion bills at the cheaper `cache_read` rate; `output_tokens` bill at
+    # the output rate.
+    #
+    # Two deliberate divergences from billing.ex (both negligible in a
+    # correctly-priced catalog, but noted so this isn't mistaken for byte-parity):
+    #   1. This keeps full Float64 precision; billing.ex rounds each line item
+    #      and the total to 6 decimals (microdollar granularity). Sub-microdollar
+    #      costs therefore differ slightly (e.g. 5.85e-6 here vs 6.0e-6 upstream).
+    #   2. When the catalog has NO `cache_read` rate, the cached portion falls
+    #      back to the input rate (so the formula collapses to
+    #      `input_tokens * input_rate`). billing.ex instead drops those cached
+    #      tokens entirely. This branch is unreachable when `cached_tokens > 0`
+    #      only ever accompanies a cache_read price; charging full input rate is
+    #      the safer interpretation if it ever isn't.
     #
     # `reasoning_tokens` are already counted inside `output_tokens` for OpenAI
-    # and there is no separate reasoning price in the models.dev `Cost` shape,
-    # so they are NOT priced separately (matching billing.ex, which only adds
-    # reasoning to output when an explicit `add_reasoning_to_cost` flag is set
-    # and no reasoning component exists). `cache_write` prices cache CREATION,
-    # which is metered by `cache_creation_tokens` — a field this `Usage` does
+    # and there is no separate reasoning price in the models.dev `Cost` shape, so
+    # they are NOT priced separately (matching billing.ex, which only adds
+    # reasoning to output behind an explicit flag). `cache_write` prices cache
+    # CREATION, metered by `cache_creation_tokens` — a field this `Usage` does
     # not carry — so it never contributes to this exchange's cost.
     #
     # Returns nil when the model is unpriced (see `Cost#priced?`), so an unknown
