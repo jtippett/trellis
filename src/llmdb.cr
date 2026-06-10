@@ -14,7 +14,22 @@ module LLMDB
   # the embedded catalog. Raises `ReqLLM::Error::Invalid::Parameter` when the
   # spec is malformed or the model is not in the catalog.
   def self.model(spec : String | Spec) : Model
-    parsed = spec.is_a?(Spec) ? spec : Spec.parse(spec)
+    if spec.is_a?(Spec)
+      return Catalog.fetch?(spec.key) ||
+        raise ReqLLM::Error::Invalid::Parameter.new("Unknown model: #{spec.key}")
+    end
+
+    # Try the literal "provider:id" first. Model ids may legitimately contain
+    # '@' (e.g. Cloudflare "workers-ai/@cf/..." or versioned ids like
+    # "claude-sonnet-4-5@20250929"), so we must not eagerly treat '@' as a
+    # version-tag separator and mis-split a real id.
+    if model = Catalog.fetch?(spec)
+      return model
+    end
+
+    # Fall back to tag-aware parsing ("provider:model@tag" -> base "provider:model").
+    # This also validates structure and raises on a malformed/unknown spec.
+    parsed = Spec.parse(spec)
     Catalog.fetch?(parsed.key) ||
       raise ReqLLM::Error::Invalid::Parameter.new("Unknown model: #{parsed.key}")
   end

@@ -29,4 +29,13 @@ describe "LLMDB catalog drift guard" do
       key.should eq(model.key)
     end
   end
+
+  it "resolves every catalog key through the public LLMDB.model API" do
+    # Catches ids that aren't lookup-addressable (e.g. ids containing '@',
+    # which must not be mis-split as a version tag).
+    unreachable = LLMDB::Catalog.all.keys.reject do |key|
+      LLMDB.model(key).key == key rescue false
+    end
+    unreachable.should be_empty
+  end
 end
