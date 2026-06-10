@@ -180,6 +180,113 @@ module ReqLLM::Providers
       {req, resp}
     end
 
+    # Decode ONE OpenAI streaming SSE event into zero-or-more `StreamChunk`s.
+    # PURE: no IO/concurrency. The chunks emit EXACTLY the metadata the
+    # `ChunkAccumulator` reads, so folding a stream yields the same `Response` as
+    # the non-streaming `decode_response`. Mirrors upstream
+    # `Defaults.default_decode_stream_event` (the OpenAI chat-completions shape).
+    #
+    # A single wire event can produce MULTIPLE chunks (e.g. a content delta plus a
+    # finish_reason meta, or N tool-call deltas, or a final usage-only frame), so
+    # all are collected and returned in order.
+    #
+    #   * `data == "[DONE]"` → `[]` (terminal sentinel; SU1 leaves it as data).
+    #   * blank/empty data → `[]` (SU1 emits field-only frames as `data == ""`;
+    #     guarded so we never `JSON.parse("")`).
+    #   * `choices[0].delta.content` (non-empty) → Content chunk.
+    #   * `choices[0].delta.reasoning`/`reasoning_content` (non-empty) → Thinking.
+    #   * `choices[0].delta.tool_calls[]` → one ToolCall delta chunk each.
+    #   * `choices[0].finish_reason` (non-null) → Meta chunk (wire string).
+    #   * top-level `usage` (the include_usage final frame) → Meta chunk with
+    #     usage NORMALIZED to the accumulator's canonical keys.
+    def decode_stream_event(event : ReqLLM::SSE::Event) : Array(ReqLLM::StreamChunk)
+      decode_stream_event(event.data)
+    end
+
+    # :ditto: convenience overload accepting the raw SSE `data` payload directly.
+    def decode_stream_event(data : String) : Array(ReqLLM::StreamChunk)
+      chunks = [] of ReqLLM::StreamChunk
+      return chunks if data == "[DONE]"
+      stripped = data.strip
+      return chunks if stripped.empty?
+
+      parsed = JSON.parse(stripped)
+
+      # Choices: content/thinking/tool-call deltas + per-choice finish_reason.
+      if choices = parsed["choices"]?.try(&.as_a?)
+        choices.each do |choice|
+          delta = choice["delta"]?
+
+          if delta
+            if content = delta["content"]?.try(&.as_s?)
+              chunks << ReqLLM::StreamChunk.text(content) unless content.empty?
+            end
+
+            reasoning = delta["reasoning"]?.try(&.as_s?) ||
+                        delta["reasoning_content"]?.try(&.as_s?)
+            if reasoning && !reasoning.empty?
+              chunks << ReqLLM::StreamChunk.thinking(reasoning)
+            end
+
+            if tool_calls = delta["tool_calls"]?.try(&.as_a?)
+              tool_calls.each do |tc|
+                chunks << decode_tool_call_delta(tc)
+              end
+            end
+          end
+
+          if finish_wire = choice["finish_reason"]?.try(&.as_s?)
+            chunks << ReqLLM::StreamChunk.meta(
+              {"finish_reason" => JSON::Any.new(finish_wire)})
+          end
+        end
+      end
+
+      # Top-level usage (include_usage final frame; choices may be empty).
+      if usage = parsed["usage"]?
+        if normalized = normalize_stream_usage(usage)
+          chunks << ReqLLM::StreamChunk.meta({"usage" => normalized})
+        end
+      end
+
+      chunks
+    end
+
+    # Build a ToolCall delta chunk from one OpenAI `delta.tool_calls[]` entry.
+    # The first fragment for an index carries `id` + `function.name`; subsequent
+    # fragments carry partial `function.arguments` pieces. An empty arguments
+    # string (the opening fragment) is NOT emitted as a fragment.
+    private def decode_tool_call_delta(tc : JSON::Any) : ReqLLM::StreamChunk
+      index = tc["index"]?.try(&.as_i?) || 0
+      id = tc["id"]?.try(&.as_s?)
+      function = tc["function"]?
+      name = function.try(&.["name"]?).try(&.as_s?)
+      args = function.try(&.["arguments"]?).try(&.as_s?)
+      fragment = (args && !args.empty?) ? args : nil
+
+      ReqLLM::StreamChunk.tool_call_delta(
+        index, id: id, name: name, arguments_fragment: fragment)
+    end
+
+    # Normalize a streaming `usage` object into the accumulator's canonical keys
+    # (`input_tokens`/`output_tokens`/`reasoning_tokens`/`cached_tokens` as Ints).
+    # Same key mapping as the non-streaming `decode_usage`. Returns nil when the
+    # value is not an object.
+    private def normalize_stream_usage(usage : JSON::Any) : JSON::Any?
+      return nil unless h = usage.as_h?
+      input = h["prompt_tokens"]?.try(&.as_i?) || 0
+      output = h["completion_tokens"]?.try(&.as_i?) || 0
+      reasoning = usage.dig?("completion_tokens_details", "reasoning_tokens").try(&.as_i?) || 0
+      cached = usage.dig?("prompt_tokens_details", "cached_tokens").try(&.as_i?) || 0
+
+      JSON::Any.new({
+        "input_tokens"     => JSON::Any.new(input.to_i64),
+        "output_tokens"    => JSON::Any.new(output.to_i64),
+        "reasoning_tokens" => JSON::Any.new(reasoning.to_i64),
+        "cached_tokens"    => JSON::Any.new(cached.to_i64),
+      } of String => JSON::Any)
+    end
+
     # Encode each message to the OpenAI `{role, content}` shape. A single bare
     # text part collapses to a string `content` (upstream
     # `normalize_encoded_content`); richer multi-part content becomes an array of

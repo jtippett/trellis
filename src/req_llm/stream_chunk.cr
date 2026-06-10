@@ -47,6 +47,27 @@ module ReqLLM
       new(ChunkType::ToolCall, name: name, arguments: arguments, metadata: metadata)
     end
 
+    # A streaming tool-call DELTA chunk, the shape `ChunkAccumulator` reassembles
+    # by index. Unlike `.tool_call` (pre-assembled arguments), providers stream
+    # tool calls as fragments: the first fragment for an `index` carries the
+    # `id` and `name`; subsequent fragments carry partial `arguments_fragment`
+    # JSON pieces that the accumulator concatenates in arrival order.
+    #
+    # Sets exactly the metadata keys the accumulator reads, so SU4 (and any later
+    # provider decoder) never hand-types the `"index"`/`"id"`/`"arguments_fragment"`
+    # strings:
+    #   * `metadata["index"]` — always set (groups fragments; REQUIRED).
+    #   * `name` (struct field) — set when present (usually the first fragment).
+    #   * `metadata["id"]` — set when present (usually the first fragment).
+    #   * `metadata["arguments_fragment"]` — set when present (a partial JSON piece).
+    def self.tool_call_delta(index : Int32, id : String? = nil, name : String? = nil,
+                             arguments_fragment : String? = nil) : StreamChunk
+      metadata = {"index" => JSON::Any.new(index.to_i64)} of String => JSON::Any
+      metadata["id"] = JSON::Any.new(id) if id
+      metadata["arguments_fragment"] = JSON::Any.new(arguments_fragment) if arguments_fragment
+      new(ChunkType::ToolCall, name: name, metadata: metadata)
+    end
+
     # A metadata chunk (finish reasons, usage, etc.). `extra_metadata` is merged
     # over `data`, matching upstream `meta/2`.
     def self.meta(data : Hash(String, JSON::Any),
