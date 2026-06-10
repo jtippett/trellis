@@ -149,18 +149,28 @@ module SyncModels
     h["reasoning"] = JSON::Any.new(bool(m, "reasoning"))
     h["temperature"] = JSON::Any.new(bool(m, "temperature"))
     h["tool_call"] = JSON::Any.new(bool(m, "tool_call"))
+    h["structured_output"] = JSON::Any.new(bool(m, "structured_output"))
     h["cost"] = build_cost(m["cost"]?)
     h["limit"] = build_limit(m["limit"]?)
     h["modalities"] = build_modalities(m["modalities"]?)
     JSON::Any.new(h)
   end
 
+  # Only scalar numeric cost keys are emitted (input/output/cache_read/
+  # cache_write). models.dev also carries non-scalar pricing for some models —
+  # `tiers` (a list), `context_over_200k` (a dict), plus audio/reasoning keys.
+  # We never read those keys, and `coerce_float` returns nil for any non-scalar,
+  # so they are simply omitted here rather than crashing. Tiered/audio pricing
+  # is tracked as future work.
   private def build_cost(cost : JSON::Any?) : JSON::Any
     h = {} of String => JSON::Any
     h["input"] = JSON::Any.new(num(cost, "input"))
     h["output"] = JSON::Any.new(num(cost, "output"))
-    if cost && (cr = cost["cache_read"]?) && coerce_float(cr)
-      h["cache_read"] = JSON::Any.new(coerce_float(cr).not_nil!)
+    if cost && (cr = coerce_float(cost["cache_read"]?))
+      h["cache_read"] = JSON::Any.new(cr)
+    end
+    if cost && (cw = coerce_float(cost["cache_write"]?))
+      h["cache_write"] = JSON::Any.new(cw)
     end
     JSON::Any.new(h)
   end
@@ -169,6 +179,9 @@ module SyncModels
     h = {} of String => JSON::Any
     h["context"] = JSON::Any.new(int(limit, "context"))
     h["output"] = JSON::Any.new(int(limit, "output"))
+    if limit && (inp = limit["input"]?) && (v = int_or_nil(inp))
+      h["input"] = JSON::Any.new(v)
+    end
     JSON::Any.new(h)
   end
 
@@ -194,7 +207,12 @@ module SyncModels
     return 0_i64 unless obj
     v = obj[key]?
     return 0_i64 unless v
-    v.as_i64? || v.as_i?.try(&.to_i64) || v.as_f?.try(&.to_i64) || 0_i64
+    int_or_nil(v) || 0_i64
+  end
+
+  private def int_or_nil(v : JSON::Any?) : Int64?
+    return nil unless v
+    v.as_i64? || v.as_i?.try(&.to_i64) || v.as_f?.try(&.to_i64)
   end
 
   private def coerce_float(v : JSON::Any?) : Float64?

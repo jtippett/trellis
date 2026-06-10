@@ -13,8 +13,9 @@ module LLMDB
   #     :reasoning   <- "reasoning"
   #     :temperature <- "temperature"
   #     :attachment  <- "attachment"
-  #   cost       <- "cost"       ({input, output, cache_read}, USD per 1M tokens)
-  #   limit      <- "limit"      ({context, output})
+  #     :structured_output <- "structured_output"
+  #   cost       <- "cost"       ({input, output, cache_read, cache_write}, USD per 1M tokens)
+  #   limit      <- "limit"      ({context, output, input})
   #   modalities <- "modalities" ({input: [...], output: [...]})
   class Model
     include JSON::Serializable
@@ -27,8 +28,10 @@ module LLMDB
       getter output : Float64 = 0.0
       @[JSON::Field(key: "cache_read")]
       getter cached : Float64? = nil
+      @[JSON::Field(key: "cache_write")]
+      getter cache_write : Float64? = nil
 
-      def initialize(@input = 0.0, @output = 0.0, @cached = nil)
+      def initialize(@input = 0.0, @output = 0.0, @cached = nil, @cache_write = nil)
       end
 
       # The input/output pair as a NamedTuple, so this catalog `Cost` struct can
@@ -45,8 +48,9 @@ module LLMDB
 
       getter context : Int32 = 0
       getter output : Int32 = 0
+      getter input : Int32? = nil
 
-      def initialize(@context = 0, @output = 0)
+      def initialize(@context = 0, @output = 0, @input = nil)
       end
     end
 
@@ -73,6 +77,7 @@ module LLMDB
     getter? reasoning : Bool = false
     getter? temperature : Bool = false
     getter? attachment : Bool = false
+    getter? structured_output : Bool = false
 
     getter cost : Cost = Cost.new
     getter limit : Limit = Limit.new
@@ -81,8 +86,9 @@ module LLMDB
     def initialize(@provider : String, @id : String, *, @name : String? = nil,
                    @type : String = "chat", @tool_call : Bool = false,
                    @reasoning : Bool = false, @temperature : Bool = false,
-                   @attachment : Bool = false, @cost : Cost = Cost.new,
-                   @limit : Limit = Limit.new, @modalities : Modalities = Modalities.new)
+                   @attachment : Bool = false, @structured_output : Bool = false,
+                   @cost : Cost = Cost.new, @limit : Limit = Limit.new,
+                   @modalities : Modalities = Modalities.new)
     end
 
     # The set of capability flags this model supports.
@@ -92,6 +98,7 @@ module LLMDB
       caps << :reasoning if reasoning?
       caps << :temperature if temperature?
       caps << :attachment if attachment?
+      caps << :structured_output if structured_output?
       caps
     end
 

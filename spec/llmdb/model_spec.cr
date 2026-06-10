@@ -10,8 +10,9 @@ private MODEL_JSON = <<-JSON
   "reasoning": false,
   "temperature": true,
   "attachment": true,
-  "cost": {"input": 0.15, "output": 0.6, "cache_read": 0.075},
-  "limit": {"context": 128000, "output": 16384},
+  "structured_output": true,
+  "cost": {"input": 0.15, "output": 0.6, "cache_read": 0.075, "cache_write": 0.15},
+  "limit": {"context": 128000, "output": 16384, "input": 100000},
   "modalities": {"input": ["text", "image"], "output": ["text"]}
 }
 JSON
@@ -31,6 +32,7 @@ describe LLMDB::Model do
     model.supports?(:temperature).should be_true
     model.supports?(:attachment).should be_true
     model.supports?(:reasoning).should be_false
+    model.supports?(:structured_output).should be_true
   end
 
   it "exposes context and output limits" do
@@ -44,6 +46,12 @@ describe LLMDB::Model do
     model.cost.input.should eq(0.15)
     model.cost.output.should eq(0.6)
     model.cost.cached.should eq(0.075)
+    model.cost.cache_write.should eq(0.15)
+  end
+
+  it "exposes the optional input token limit" do
+    model = LLMDB::Model.from_json(MODEL_JSON)
+    model.limit.input.should eq(100000)
   end
 
   it "exposes modalities" do
@@ -55,8 +63,11 @@ describe LLMDB::Model do
   it "defaults missing optional fields" do
     model = LLMDB::Model.from_json(%({"id": "x", "provider": "openai"}))
     model.cost.input.should eq(0.0)
+    model.cost.cache_write.should be_nil
+    model.limit.input.should be_nil
     model.context_limit.should eq(0)
     model.supports?(:tools).should be_false
+    model.supports?(:structured_output).should be_false
     model.modalities.input.should be_empty
   end
 end
