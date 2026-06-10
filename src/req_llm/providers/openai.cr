@@ -230,6 +230,9 @@ module ReqLLM::Providers
         "description" => JSON::Any.new(tool.description),
         "parameters"  => JSON::Any.new(tool.to_json_schema),
       } of String => JSON::Any
+      # Upstream `Schema.to_openai_format` only adds `"strict": true` when the
+      # tool is strict, and omits the key otherwise (never emits `strict: false`).
+      function["strict"] = JSON::Any.new(true) if tool.strict
 
       {
         "type"     => JSON::Any.new("function"),

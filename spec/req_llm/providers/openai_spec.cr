@@ -61,6 +61,29 @@ describe ReqLLM::Providers::OpenAI do
       JSON.parse(body).should eq(JSON.parse(File.read("spec/golden/openai/chat_tools.json")))
     end
 
+    it "emits strict and full schema fidelity matching the strict golden" do
+      ctx = ReqLLM::Context.new([
+        ReqLLM::Message.new(ReqLLM::Role::User, "What's the weather in Paris?"),
+      ])
+      model = LLMDB.model("openai:gpt-4o-mini")
+
+      schema = {
+        "type"                 => JSON::Any.new("object"),
+        "additionalProperties" => JSON::Any.new(false),
+        "properties"           => JSON::Any.new({
+          "location" => JSON::Any.new({"type" => JSON::Any.new("string")}),
+        } of String => JSON::Any),
+        "required" => JSON::Any.new([JSON::Any.new("location")]),
+      } of String => JSON::Any
+      tool = ReqLLM::Tool.new(
+        "get_weather", "Get the current weather for a location", schema, strict: true)
+
+      opts = ReqLLM::Options.validate({tools: [tool]})
+      body = ReqLLM::Providers::OpenAI.new.encode_chat_body(model, ctx, opts)
+
+      JSON.parse(body).should eq(JSON.parse(File.read("spec/golden/openai/chat_tools_strict.json")))
+    end
+
     it "omits tool_choice by default (upstream only emits when explicitly set)" do
       ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "Hi")])
       model = LLMDB.model("openai:gpt-4o-mini")

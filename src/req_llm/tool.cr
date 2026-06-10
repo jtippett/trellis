@@ -20,10 +20,14 @@ module ReqLLM
     getter description : String
     getter parameter_schema : Hash(String, JSON::Any)
     getter callback : ToolCallback?
+    # When true, providers that support it (e.g. OpenAI structured outputs) emit
+    # a per-tool `"strict": true` flag. Mirrors ReqLLM.Tool's optional `strict`
+    # field (tool.ex), which defaults to false.
+    getter strict : Bool
 
     def initialize(@name : String, @description : String,
                    @parameter_schema : Hash(String, JSON::Any) = {} of String => JSON::Any,
-                   @callback : ToolCallback? = nil)
+                   @callback : ToolCallback? = nil, *, @strict : Bool = false)
       unless Tool.valid_name?(@name)
         raise Error::Invalid::Parameter.new(
           "Invalid tool name: #{@name.inspect}. Must be a valid identifier " \
@@ -33,18 +37,17 @@ module ReqLLM
     end
 
     # Convert this Tool's parameter schema to the JSON Schema object format used
-    # by LLM function-calling APIs. Always yields `type`/`properties`/`required`.
+    # by LLM function-calling APIs. Preserves ALL top-level keys of
+    # `parameter_schema` (e.g. `additionalProperties`, `$defs`/`definitions`,
+    # top-level `description`, `$schema`) and only fills in `type`/`properties`/
+    # `required` defaults when absent — mirroring how upstream builds an object
+    # schema while never clobbering an explicit `type`.
     def to_json_schema : Hash(String, JSON::Any)
-      properties = @parameter_schema["properties"]? ||
-                   JSON::Any.new({} of String => JSON::Any)
-      required = @parameter_schema["required"]? ||
-                 JSON::Any.new([] of JSON::Any)
-
-      {
-        "type"       => JSON::Any.new("object"),
-        "properties" => properties,
-        "required"   => required,
-      } of String => JSON::Any
+      schema = @parameter_schema.dup
+      schema["type"] ||= JSON::Any.new("object")
+      schema["properties"] ||= JSON::Any.new({} of String => JSON::Any)
+      schema["required"] ||= JSON::Any.new([] of JSON::Any)
+      schema
     end
 
     # Tool names must be valid identifiers: alphanumerics, underscores, or

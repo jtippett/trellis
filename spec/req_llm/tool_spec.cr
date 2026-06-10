@@ -27,6 +27,46 @@ describe ReqLLM::Tool do
     schema["required"].as_a.should be_empty
   end
 
+  it "preserves all top-level schema keys via to_json_schema" do
+    tool = ReqLLM::Tool.new(
+      "lookup",
+      "Look something up",
+      {
+        "description"          => JSON::Any.new("A lookup request"),
+        "additionalProperties" => JSON::Any.new(false),
+        "$defs"                => JSON::Any.new({
+          "Id" => JSON::Any.new({"type" => JSON::Any.new("string")}),
+        } of String => JSON::Any),
+        "properties" => JSON::Any.new({
+          "id" => JSON::Any.new({"$ref" => JSON::Any.new("#/$defs/Id")}),
+        } of String => JSON::Any),
+        "required" => JSON::Any.new([JSON::Any.new("id")]),
+      } of String => JSON::Any
+    )
+
+    schema = tool.to_json_schema
+    schema["type"].should eq("object")
+    schema["description"].should eq("A lookup request")
+    schema["additionalProperties"].should eq(false)
+    schema["$defs"].as_h["Id"].as_h["type"].should eq("string")
+    schema["properties"].as_h["id"].as_h["$ref"].should eq("#/$defs/Id")
+    schema["required"].as_a.map(&.as_s).should eq(["id"])
+  end
+
+  it "does not clobber an explicit non-object type" do
+    tool = ReqLLM::Tool.new(
+      "stringy",
+      "A stringy tool",
+      {"type" => JSON::Any.new("string")} of String => JSON::Any
+    )
+    tool.to_json_schema["type"].should eq("string")
+  end
+
+  it "defaults strict to false and exposes it via the constructor" do
+    ReqLLM::Tool.new("plain", "Plain tool").strict.should be_false
+    ReqLLM::Tool.new("strict_tool", "Strict tool", strict: true).strict.should be_true
+  end
+
   it "rejects an invalid tool name" do
     expect_raises(ReqLLM::Error::Invalid::Parameter, /invalid/i) do
       ReqLLM::Tool.new("123 invalid", "desc")
