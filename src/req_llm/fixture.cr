@@ -121,6 +121,10 @@ module ReqLLM
     end
 
     # Parse a fixture file into a raw HTTP::Response (decoded == nil).
+    #
+    # A present-but-malformed fixture (invalid JSON, wrong shape, or wrong
+    # value types) is re-raised as a typed `ReqLLM::Error` naming the path,
+    # rather than leaking a raw JSON/cast exception mid-pipeline.
     def load_response(file : String) : HTTP::Response
       parsed = JSON.parse(File.read(file))
       status = parsed["status"].as_i
@@ -130,6 +134,9 @@ module ReqLLM
       end
       body = parsed["body"].as_s
       HTTP::Response.new(status, headers, body)
+    rescue ex : JSON::ParseException | TypeCastError | KeyError | NilAssertionError
+      raise Error::Invalid::Parameter.new(
+        "malformed fixture #{file}: #{ex.message}")
     end
   end
 end

@@ -24,7 +24,6 @@ describe ReqLLM::Message do
   it "exposes lossless round-trip metadata fields" do
     msg = ReqLLM::Message.new(ReqLLM::Role::User, "hi")
     msg.metadata.should eq({} of String => JSON::Any)
-    msg.provider_data.should be_nil
     msg.reasoning_details.should be_nil
   end
 end

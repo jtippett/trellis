@@ -135,6 +135,32 @@ describe ReqLLM::Fixture do
     end
   end
 
+  describe "corrupt fixture file" do
+    it "raises a ReqLLM::Error naming the fixture path" do
+      tmp = File.tempname("cr_llm_fixtures")
+      ReqLLM::Fixture.base_dir = tmp
+      begin
+        file = ReqLLM::Fixture.path(:openai, "corrupt")
+        Dir.mkdir_p(File.dirname(file))
+        File.write(file, "this is not json {{{")
+
+        req = ReqLLM::HTTP::Request.new("POST", URI.parse("https://x/y"))
+        ReqLLM::Fixture.attach(req, :openai, "corrupt")
+        append_text_decode(req)
+
+        adapter = FakeAdapter.new # raises if transport is invoked
+        ex = expect_raises(ReqLLM::Error) do
+          ReqLLM::HTTP::Pipeline.run(req, adapter)
+        end
+        ex.message.not_nil!.should contain(file)
+        ex.message.not_nil!.should contain("malformed fixture")
+      ensure
+        ReqLLM::Fixture.base_dir = ReqLLM::Fixture::DEFAULT_BASE_DIR
+        FileUtils.rm_rf(tmp)
+      end
+    end
+  end
+
   describe "record then replay" do
     it "captures the raw response in record mode, then replays it" do
       tmp = File.tempname("cr_llm_fixtures")
