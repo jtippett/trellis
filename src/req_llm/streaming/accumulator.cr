@@ -121,13 +121,16 @@ module ReqLLM
       merged_tools = context.try(&.tools) || [] of Tool
       merged_context = Context.new(merged_messages, merged_tools)
 
-      finish_reason = @finish_reason_wire.try { |w| FinishReason.from_wire(w) }
+      # Match non-streaming decode parity (so `join == non-stream`):
+      # `FinishReason.from_wire(nil) == Other` (never nil), and absent usage is a
+      # zeroed `Usage` (decode_usage never returns nil), not nil.
+      finish_reason = FinishReason.from_wire(@finish_reason_wire)
 
       Response.new(
         model: model,
         context: merged_context,
         message: message,
-        usage: @usage,
+        usage: @usage || Usage.new,
         finish_reason: finish_reason,
       )
     end

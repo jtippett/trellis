@@ -97,14 +97,15 @@ describe ReqLLM::ChunkAccumulator do
     resp.text.should eq("Answer")
   end
 
-  it "returns a sane empty Response when no chunks were added" do
+  it "returns a sane empty Response when no chunks were added (non-stream parity)" do
     acc = ReqLLM::ChunkAccumulator.new
     resp = acc.finish("openai:gpt-4o")
 
     resp.text.should eq("")
     resp.tool_calls.should be_empty
-    resp.finish_reason.should be_nil
-    resp.usage.should be_nil
+    # Parity with non-streaming decode: from_wire(nil) == Other, usage zeroed.
+    resp.finish_reason.should eq(ReqLLM::FinishReason::Other)
+    resp.usage.not_nil!.total_tokens.should eq(0)
     resp.message.not_nil!.role.should eq(ReqLLM::Role::Assistant)
   end
 
