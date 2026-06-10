@@ -24,6 +24,14 @@ describe ReqLLM::Providers::OpenAI do
       provider.decode_stream_event(event(data)).should be_empty
     end
 
+    it "raises on an in-stream error frame (surfaced to the consumer)" do
+      data = %({"error":{"message":"content filtered","type":"server_error"}})
+      ex = expect_raises(ReqLLM::Error::API::Response, /content filtered/) do
+        provider.decode_stream_event(event(data))
+      end
+      ex.message.not_nil!.should contain("stream error")
+    end
+
     it "decodes a tool_call delta carrying id + name into a ToolCall chunk" do
       data = %({"choices":[{"index":0,"delta":{"tool_calls":[) +
              %({"index":0,"id":"call_x","type":"function",) +

@@ -212,6 +212,16 @@ module ReqLLM::Providers
 
       parsed = JSON.parse(stripped)
 
+      # In-stream error frame: a 200 OK stream can carry `{"error": {...}}`
+      # mid-flight (content filter, server-side failure). The transport status
+      # was 200 so `Steps.error` never fired, so surface it here — raising
+      # propagates to the consumer via the producer fiber, matching the
+      # non-streaming path where `Steps.error` raises on a bad response.
+      if err = parsed["error"]?
+        message = err["message"]?.try(&.as_s?) || err.as_s? || err.to_json
+        raise ReqLLM::Error::API::Response.new("OpenAI stream error: #{message}")
+      end
+
       # Choices: content/thinking/tool-call deltas + per-choice finish_reason.
       if choices = parsed["choices"]?.try(&.as_a?)
         choices.each do |choice|
