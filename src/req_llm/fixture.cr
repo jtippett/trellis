@@ -126,7 +126,10 @@ module ReqLLM
     # value types) is re-raised as a typed `ReqLLM::Error` naming the path,
     # rather than leaking a raw JSON/cast exception mid-pipeline.
     def load_response(file : String) : HTTP::Response
-      parsed = JSON.parse(File.read(file))
+      # `.as_h` anchors the top-level shape: a valid-JSON-but-non-object fixture
+      # (e.g. `[1,2,3]` or `42`) raises TypeCastError, which is caught below
+      # alongside parse/key/cast failures.
+      parsed = JSON.parse(File.read(file)).as_h
       status = parsed["status"].as_i
       headers = ::HTTP::Headers.new
       parsed["headers"].as_h.each do |key, value|
@@ -134,7 +137,7 @@ module ReqLLM
       end
       body = parsed["body"].as_s
       HTTP::Response.new(status, headers, body)
-    rescue ex : JSON::ParseException | TypeCastError | KeyError | NilAssertionError
+    rescue ex : JSON::ParseException | TypeCastError | KeyError
       raise Error::Invalid::Parameter.new(
         "malformed fixture #{file}: #{ex.message}")
     end

@@ -159,6 +159,28 @@ describe ReqLLM::Fixture do
         FileUtils.rm_rf(tmp)
       end
     end
+
+    it "raises a typed error for valid JSON that is not an object" do
+      tmp = File.tempname("cr_llm_fixtures")
+      ReqLLM::Fixture.base_dir = tmp
+      begin
+        file = ReqLLM::Fixture.path(:openai, "notobject")
+        Dir.mkdir_p(File.dirname(file))
+        File.write(file, "[1, 2, 3]") # valid JSON, wrong top-level shape
+
+        req = ReqLLM::HTTP::Request.new("POST", URI.parse("https://x/y"))
+        ReqLLM::Fixture.attach(req, :openai, "notobject")
+        append_text_decode(req)
+
+        ex = expect_raises(ReqLLM::Error) do
+          ReqLLM::HTTP::Pipeline.run(req, FakeAdapter.new)
+        end
+        ex.message.not_nil!.should contain("malformed fixture")
+      ensure
+        ReqLLM::Fixture.base_dir = ReqLLM::Fixture::DEFAULT_BASE_DIR
+        FileUtils.rm_rf(tmp)
+      end
+    end
   end
 
   describe "record then replay" do
