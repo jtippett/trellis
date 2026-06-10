@@ -76,10 +76,12 @@ module ReqLLM
       return {req, resp} unless usage
 
       # Compute and attach per-token cost from the model's catalog pricing
-      # (USD per 1M tokens). `Usage` is a value type, so set cost on the local
-      # copy and write it back onto the decoded response.
+      # (USD per 1M tokens), cache-discounted and nil for unpriced models.
+      # `Usage` is a value type, so set cost on the local copy and write it back
+      # onto the decoded response. A nil result (unpriced model) leaves
+      # `usage.cost` nil — an unknown cost, not a misleading $0.
       if model = req.model
-        usage.cost = usage.cost(model.cost.to_pricing)
+        usage.cost = usage.cost(model.cost)
       end
       decoded.usage = usage
 

@@ -34,6 +34,15 @@ module LLMDB
       def initialize(@input = 0.0, @output = 0.0, @cached = nil, @cache_write = nil)
       end
 
+      # Whether this catalog entry carries any pricing. An all-zero `Cost`
+      # (input == 0, output == 0, and no cache rates) means the model is
+      # unpriced — cost is *unknown*, not free — so `Usage#cost` returns nil for
+      # it, mirroring upstream `ReqLLM.Billing.calculate` returning `{:ok, nil}`
+      # when a model has no pricing components (billing.ex).
+      def priced? : Bool
+        input != 0.0 || output != 0.0 || !cached.nil? || !cache_write.nil?
+      end
+
       # The input/output pair as a NamedTuple, so this catalog `Cost` struct can
       # be passed straight to `ReqLLM::Usage#cost(pricing)` (which indexes
       # `pricing[:input]` / `pricing[:output]`).

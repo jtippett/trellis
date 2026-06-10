@@ -42,6 +42,37 @@ module ReqLLM
         (output_tokens.to_f / 1_000_000.0) * output
     end
 
+    # Cache-aware dollar cost from a catalog `Cost` struct (USD per 1M tokens),
+    # the faithful per-exchange cost. Mirrors `ReqLLM.Billing` (billing.ex):
+    # OpenAI-style `cached_tokens` are a SUBSET of `input_tokens`, so the
+    # non-cached portion `(input_tokens - cached_tokens)` bills at the input
+    # rate while the cached portion bills at the cheaper `cache_read` rate;
+    # `output_tokens` bill at the output rate. When the catalog has no
+    # `cache_read` rate the cached portion falls back to the input rate, which
+    # collapses the formula to `input_tokens * input_rate` (no carve-out).
+    #
+    # `reasoning_tokens` are already counted inside `output_tokens` for OpenAI
+    # and there is no separate reasoning price in the models.dev `Cost` shape,
+    # so they are NOT priced separately (matching billing.ex, which only adds
+    # reasoning to output when an explicit `add_reasoning_to_cost` flag is set
+    # and no reasoning component exists). `cache_write` prices cache CREATION,
+    # which is metered by `cache_creation_tokens` — a field this `Usage` does
+    # not carry — so it never contributes to this exchange's cost.
+    #
+    # Returns nil when the model is unpriced (see `Cost#priced?`), so an unknown
+    # cost stays nil rather than reading as a misleading `0.0` (free).
+    def cost(cost : LLMDB::Model::Cost) : Float64?
+      return nil unless cost.priced?
+
+      input_rate = cost.input
+      cache_read_rate = cost.cached || input_rate
+      billed_input = {input_tokens - cached_tokens, 0}.max
+
+      (billed_input.to_f / 1_000_000.0) * input_rate +
+        (cached_tokens.to_f / 1_000_000.0) * cache_read_rate +
+        (output_tokens.to_f / 1_000_000.0) * cost.output
+    end
+
     # Human-readable dollar string for the stored `cost`, e.g. "$0.0000027"
     # (trailing zeros trimmed). Avoids Float64#to_s scientific-notation noise
     # like "2.6999999999999996e-6". Returns nil when no cost is computed.
