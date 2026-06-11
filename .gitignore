@@ -8,3 +8,6 @@
 
 # Vendored upstream reference (not part of this shard)
 /req_llm/
+
+# Local journal (never commit)
+.private-journal/

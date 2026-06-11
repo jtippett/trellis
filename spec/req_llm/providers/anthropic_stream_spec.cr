@@ -211,6 +211,12 @@ describe ReqLLM::Providers::Anthropic do
       body = req.body.as(String)
       JSON.parse(body)["stream"].should eq(JSON::Any.new(true))
       body.should contain(%("stream":true))
+    ensure
+      if pk = prior_key
+        ENV["ANTHROPIC_API_KEY"] = pk
+      else
+        ENV.delete("ANTHROPIC_API_KEY")
+      end
     end
 
     it "AUTH-SKIP-ON-REPLAY: omits x-api-key but sets Accept/anthropic-version (no key)" do
