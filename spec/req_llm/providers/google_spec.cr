@@ -295,6 +295,28 @@ describe ReqLLM::Providers::Google do
       addr["properties"]["city"]["type"].as_s.should eq("STRING")
     end
 
+    it "raises on a tuple-array (list-valued items) schema on the responseSchema path" do
+      ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "x")])
+      model = LLMDB.model("google:gemini-2.0-flash") # responseSchema (convert) path
+      opts = ReqLLM::Options.validate(NamedTuple.new)
+      tuple_schema = {
+        "type"       => JSON::Any.new("object"),
+        "properties" => JSON::Any.new({
+          "pair" => JSON::Any.new({
+            "type"  => JSON::Any.new("array"),
+            "items" => JSON::Any.new([ # list-valued = tuple validation
+              JSON::Any.new({"type" => JSON::Any.new("string")}),
+              JSON::Any.new({"type" => JSON::Any.new("integer")}),
+            ]),
+          } of String => JSON::Any),
+        } of String => JSON::Any),
+      } of String => JSON::Any
+
+      expect_raises(ReqLLM::Error::Invalid::Schema, /tuple/) do
+        ReqLLM::Providers::Google.new.encode_object_body(model, ctx, opts, tuple_schema, "output_schema")
+      end
+    end
+
     it "uses responseJsonSchema (plain passthrough) for a 2.5+ model (gemini-2.5-flash)" do
       ctx = ReqLLM::Context.new([
         ReqLLM::Message.new(ReqLLM::Role::User, "Give me a person"),

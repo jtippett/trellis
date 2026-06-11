@@ -150,6 +150,12 @@ module ReqLLM::Providers
       # Start from any existing generationConfig (temperature/maxOutputTokens/...)
       # so the non-object config keys are preserved; object mode ALWAYS emits a
       # generationConfig (it carries at least responseMimeType + the schema).
+      #
+      # Deliberate deviations from upstream (both inert): upstream also seeds
+      # `candidateCount: 1`, but 1 is the Gemini default, so we omit it to keep
+      # the body minimal. The 2.5/3 gate is by model id alone (upstream also
+      # checks the schema's top-level type is a known scalar/object/array); for
+      # well-formed object schemas the two agree.
       gc = body["generationConfig"]?.try(&.as_h?).try(&.dup) || {} of String => JSON::Any
       gc["responseMimeType"] = JSON::Any.new("application/json")
       if json_schema_supported?(model.id)
@@ -256,11 +262,17 @@ module ReqLLM::Providers
         when "properties"
           result["properties"] = convert_properties_to_google(value)
         when "items"
-          result["items"] = if h = value.as_h?
-                              JSON::Any.new(convert_to_google_schema(h))
-                            else
-                              value
-                            end
+          if h = value.as_h?
+            result["items"] = JSON::Any.new(convert_to_google_schema(h))
+          elsif value.as_a?
+            # A list-valued `items` is JSON Schema tuple validation, which the
+            # Gemini schema does not support — reject rather than emit an invalid
+            # schema (ports upstream `raise_unsupported_schema`, google.ex:1306).
+            raise ReqLLM::Error::Invalid::Schema.new(
+              "tuple arrays (list-valued \"items\") are not supported by the Gemini schema")
+          else
+            result["items"] = value
+          end
         else
           result[key] = value
         end
