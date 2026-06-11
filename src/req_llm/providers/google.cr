@@ -106,12 +106,66 @@ module ReqLLM::Providers
     end
 
     # Request step: serialize the typed state into the Gemini request body.
+    # For the `:object` operation (set by `generate_object`) it dispatches to
+    # `encode_object_body`, which sets `generationConfig.responseMimeType` +
+    # `responseSchema`/`responseJsonSchema` so the model returns the structured
+    # object as the candidate text (decode is unchanged; the shared
+    # `unwrap_object` parses it). Gemini object output is non-streaming
+    # `generateContent`, so the URL built by `prepare_request(:object)` is the
+    # normal one — no path rewrite.
     def encode_body(req : HTTP::Request) : HTTP::Request
       model = req.model.as(LLMDB::Model)
       context = req.context.as(ReqLLM::Context)
       opts = req.options.as(ReqLLM::Options::Validated)
-      req.body = encode_chat_body(model, context, opts)
+      if req.operation == :object && (schema = req.object_schema)
+        req.body = encode_object_body(
+          model, context, opts, schema, req.object_schema_name || "output_schema")
+      else
+        req.body = encode_chat_body(model, context, opts)
+      end
       req
+    end
+
+    # Build the Gemini `generateContent` request body for the `:object`
+    # operation: the normal chat body PLUS, in `generationConfig`,
+    # `responseMimeType: "application/json"` and the response schema. The schema
+    # form depends on the model: gemini-2.5+/gemini-3 accept a plain JSON Schema
+    # (`responseJsonSchema`, passed AS-IS); earlier models need the Gemini schema
+    # dialect (`responseSchema`, via `convert_to_google_schema` — uppercase types,
+    # no `additionalProperties`, with `propertyOrdering`). Ports upstream
+    # `encode_object_body` + `put_schema_for_model` (google.ex:1211-1290). The
+    # rest of the body (systemInstruction hoist, contents, the other
+    # generationConfig keys) is byte-identical to the chat body. Public so a test
+    # can drive it directly with an explicit schema + name.
+    # `name` is part of the uniform `encode_object_body` signature shared across
+    # providers (so the `encode_body` dispatch is identical), but Google does not
+    # use it: Gemini keys the schema by `responseSchema`/`responseJsonSchema`, not
+    # by a caller-supplied name (that name is meaningful only on the OpenAI
+    # `response_format` path).
+    def encode_object_body(model : LLMDB::Model, context : ReqLLM::Context,
+                           opts : ReqLLM::Options::Validated,
+                           schema : Hash(String, JSON::Any), name : String) : String
+      body = chat_body_hash(model, context, opts)
+
+      # Start from any existing generationConfig (temperature/maxOutputTokens/...)
+      # so the non-object config keys are preserved; object mode ALWAYS emits a
+      # generationConfig (it carries at least responseMimeType + the schema).
+      #
+      # Deliberate deviations from upstream (both inert): upstream also seeds
+      # `candidateCount: 1`, but 1 is the Gemini default, so we omit it to keep
+      # the body minimal. The 2.5/3 gate is by model id alone (upstream also
+      # checks the schema's top-level type is a known scalar/object/array); for
+      # well-formed object schemas the two agree.
+      gc = body["generationConfig"]?.try(&.as_h?).try(&.dup) || {} of String => JSON::Any
+      gc["responseMimeType"] = JSON::Any.new("application/json")
+      if json_schema_supported?(model.id)
+        gc["responseJsonSchema"] = JSON::Any.new(schema)
+      else
+        gc["responseSchema"] = JSON::Any.new(convert_to_google_schema(schema))
+      end
+      body["generationConfig"] = JSON::Any.new(gc)
+
+      body.to_json
     end
 
     # Build the Gemini `generateContent` request body as a JSON string. Public so
@@ -142,6 +196,16 @@ module ReqLLM::Providers
     # `contents`, `tools?`, `generationConfig?`.
     def encode_chat_body(model : LLMDB::Model, context : ReqLLM::Context,
                          opts : ReqLLM::Options::Validated) : String
+      chat_body_hash(model, context, opts).to_json
+    end
+
+    # Assemble the Gemini `generateContent` body as a Hash (shared by
+    # `encode_chat_body` and `encode_object_body`, which adds the object-mode
+    # `generationConfig` keys). Key order is deterministic and pinned by the
+    # chat goldens: `systemInstruction?`, `contents`, `tools?`,
+    # `generationConfig?`.
+    private def chat_body_hash(model : LLMDB::Model, context : ReqLLM::Context,
+                               opts : ReqLLM::Options::Validated) : Hash(String, JSON::Any)
       body = {} of String => JSON::Any
 
       system, non_system = partition_system(context.messages)
@@ -163,7 +227,101 @@ module ReqLLM::Providers
         body["generationConfig"] = gc
       end
 
-      body.to_json
+      body
+    end
+
+    # True when the model accepts a plain JSON Schema in `responseJsonSchema`
+    # (gemini-2.5+/gemini-3). Earlier models need the Gemini schema dialect via
+    # `responseSchema`. Ports upstream `json_schema_supported?`
+    # (google.ex:1274-1279).
+    private def json_schema_supported?(id : String) : Bool
+      id.starts_with?("gemini-2.5") || id.starts_with?("gemini-3")
+    end
+
+    # Convert a plain JSON Schema into the Gemini schema dialect for
+    # `responseSchema` (ports `convert_to_google_schema` + `to_google_type` +
+    # `convert_properties_to_google` + `maybe_add_property_ordering`,
+    # google.ex:1298-1343): drop `additionalProperties`/`$schema`; UPPERCASE the
+    # `"type"` VALUE (object→OBJECT, array→ARRAY, string→STRING, integer→INTEGER,
+    # number→NUMBER, boolean→BOOLEAN, null→NULL; an unknown value passes through);
+    # recurse `properties` values and an object `items`; and, when an object has
+    # non-empty `properties`, add `propertyOrdering` = the property key order
+    # (unless already present). PURE: returns a new Hash; never mutates the input.
+    private def convert_to_google_schema(schema : Hash(String, JSON::Any)) : Hash(String, JSON::Any)
+      result = {} of String => JSON::Any
+      schema.each do |key, value|
+        next if key == "additionalProperties" || key == "$schema"
+
+        case key
+        when "type"
+          if s = value.as_s?
+            result["type"] = JSON::Any.new(to_google_type(s))
+          else
+            result["type"] = value
+          end
+        when "properties"
+          result["properties"] = convert_properties_to_google(value)
+        when "items"
+          if h = value.as_h?
+            result["items"] = JSON::Any.new(convert_to_google_schema(h))
+          elsif value.as_a?
+            # A list-valued `items` is JSON Schema tuple validation, which the
+            # Gemini schema does not support — reject rather than emit an invalid
+            # schema (ports upstream `raise_unsupported_schema`, google.ex:1306).
+            raise ReqLLM::Error::Invalid::Schema.new(
+              "tuple arrays (list-valued \"items\") are not supported by the Gemini schema")
+          else
+            result["items"] = value
+          end
+        else
+          result[key] = value
+        end
+      end
+
+      maybe_add_property_ordering(result)
+    end
+
+    # Map a JSON Schema `type` value to the Gemini UPPERCASE form; an unknown
+    # value passes through unchanged (ports `to_google_type`).
+    private def to_google_type(type : String) : String
+      case type
+      when "object"  then "OBJECT"
+      when "array"   then "ARRAY"
+      when "string"  then "STRING"
+      when "integer" then "INTEGER"
+      when "number"  then "NUMBER"
+      when "boolean" then "BOOLEAN"
+      when "null"    then "NULL"
+      else                type
+      end
+    end
+
+    # Recurse each property value through `convert_to_google_schema` (object
+    # values), preserving key order; non-object values pass through.
+    private def convert_properties_to_google(properties : JSON::Any) : JSON::Any
+      h = properties.as_h?
+      return properties unless h
+
+      converted = {} of String => JSON::Any
+      h.each do |k, v|
+        converted[k] = if vh = v.as_h?
+                         JSON::Any.new(convert_to_google_schema(vh))
+                       else
+                         v
+                       end
+      end
+      JSON::Any.new(converted)
+    end
+
+    # When an object schema has non-empty `properties`, add `propertyOrdering` =
+    # the property key order (unless already present). Mutates + returns the
+    # passed Hash (it is the freshly built result from `convert_to_google_schema`).
+    private def maybe_add_property_ordering(schema : Hash(String, JSON::Any)) : Hash(String, JSON::Any)
+      props = schema["properties"]?.try(&.as_h?)
+      if props && !props.empty? && !schema.has_key?("propertyOrdering")
+        schema["propertyOrdering"] = JSON::Any.new(props.keys.map { |k| JSON::Any.new(k) })
+      end
+      schema
     end
 
     # Split messages into `{system, non_system}` by `role.system?`. System

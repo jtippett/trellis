@@ -243,6 +243,125 @@ describe ReqLLM::Providers::Google do
     end
   end
 
+  describe "#encode_object_body" do
+    # A nested object schema, exercising the recursive convert_to_google_schema.
+    nested_schema = {
+      "type"                 => JSON::Any.new("object"),
+      "additionalProperties" => JSON::Any.new(false),
+      "properties"           => JSON::Any.new({
+        "name"    => JSON::Any.new({"type" => JSON::Any.new("string")}),
+        "age"     => JSON::Any.new({"type" => JSON::Any.new("integer")}),
+        "address" => JSON::Any.new({
+          "type"                 => JSON::Any.new("object"),
+          "additionalProperties" => JSON::Any.new(false),
+          "properties"           => JSON::Any.new({
+            "city" => JSON::Any.new({"type" => JSON::Any.new("string")}),
+          } of String => JSON::Any),
+        } of String => JSON::Any),
+      } of String => JSON::Any),
+      "required" => JSON::Any.new([JSON::Any.new("name")]),
+    } of String => JSON::Any
+
+    it "uses responseSchema with UPPERCASE types for a pre-2.5 model (gemini-2.0-flash)" do
+      ctx = ReqLLM::Context.new([
+        ReqLLM::Message.new(ReqLLM::Role::User, "Give me a person"),
+      ])
+      model = LLMDB.model("google:gemini-2.0-flash")
+      opts = ReqLLM::Options.validate(NamedTuple.new)
+
+      body = ReqLLM::Providers::Google.new.encode_object_body(
+        model, ctx, opts, nested_schema, "output_schema")
+      parsed = JSON.parse(body)
+
+      gc = parsed["generationConfig"]
+      gc["responseMimeType"].as_s.should eq("application/json")
+
+      schema = gc["responseSchema"]
+      # responseJsonSchema must be absent on the pre-2.5 path.
+      gc.as_h.has_key?("responseJsonSchema").should be_false
+
+      # type VALUES uppercased; additionalProperties dropped; propertyOrdering added.
+      schema["type"].as_s.should eq("OBJECT")
+      schema.as_h.has_key?("additionalProperties").should be_false
+      schema["propertyOrdering"].as_a.map(&.as_s).should eq(["name", "age", "address"])
+      schema["properties"]["name"]["type"].as_s.should eq("STRING")
+      schema["properties"]["age"]["type"].as_s.should eq("INTEGER")
+
+      # Recursion into the nested object property.
+      addr = schema["properties"]["address"]
+      addr["type"].as_s.should eq("OBJECT")
+      addr.as_h.has_key?("additionalProperties").should be_false
+      addr["propertyOrdering"].as_a.map(&.as_s).should eq(["city"])
+      addr["properties"]["city"]["type"].as_s.should eq("STRING")
+    end
+
+    it "raises on a tuple-array (list-valued items) schema on the responseSchema path" do
+      ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "x")])
+      model = LLMDB.model("google:gemini-2.0-flash") # responseSchema (convert) path
+      opts = ReqLLM::Options.validate(NamedTuple.new)
+      tuple_schema = {
+        "type"       => JSON::Any.new("object"),
+        "properties" => JSON::Any.new({
+          "pair" => JSON::Any.new({
+            "type"  => JSON::Any.new("array"),
+            "items" => JSON::Any.new([ # list-valued = tuple validation
+              JSON::Any.new({"type" => JSON::Any.new("string")}),
+              JSON::Any.new({"type" => JSON::Any.new("integer")}),
+            ]),
+          } of String => JSON::Any),
+        } of String => JSON::Any),
+      } of String => JSON::Any
+
+      expect_raises(ReqLLM::Error::Invalid::Schema, /tuple/) do
+        ReqLLM::Providers::Google.new.encode_object_body(model, ctx, opts, tuple_schema, "output_schema")
+      end
+    end
+
+    it "uses responseJsonSchema (plain passthrough) for a 2.5+ model (gemini-2.5-flash)" do
+      ctx = ReqLLM::Context.new([
+        ReqLLM::Message.new(ReqLLM::Role::User, "Give me a person"),
+      ])
+      model = LLMDB.model("google:gemini-2.5-flash")
+      opts = ReqLLM::Options.validate(NamedTuple.new)
+
+      body = ReqLLM::Providers::Google.new.encode_object_body(
+        model, ctx, opts, nested_schema, "output_schema")
+      parsed = JSON.parse(body)
+
+      gc = parsed["generationConfig"]
+      gc["responseMimeType"].as_s.should eq("application/json")
+
+      # responseSchema must be absent on the json-schema-supported path.
+      gc.as_h.has_key?("responseSchema").should be_false
+
+      # The schema passes through AS-IS: lowercase types, additionalProperties kept.
+      schema = gc["responseJsonSchema"]
+      schema["type"].as_s.should eq("object")
+      schema["additionalProperties"].as_bool.should be_false
+      schema["properties"]["name"]["type"].as_s.should eq("string")
+      schema["properties"]["age"]["type"].as_s.should eq("integer")
+    end
+
+    it "preserves the non-object body (contents) and threads generationConfig" do
+      ctx = ReqLLM::Context.new([
+        ReqLLM::Message.new(ReqLLM::Role::User, "Give me a person"),
+      ])
+      model = LLMDB.model("google:gemini-2.0-flash")
+      opts = ReqLLM::Options.validate({temperature: 0.7})
+
+      body = ReqLLM::Providers::Google.new.encode_object_body(
+        model, ctx, opts, nested_schema, "output_schema")
+      parsed = JSON.parse(body)
+
+      # contents preserved from the shared chat-body construction.
+      parsed["contents"][0]["role"].as_s.should eq("user")
+      parsed["contents"][0]["parts"][0]["text"].as_s.should eq("Give me a person")
+      # existing generationConfig keys are retained alongside the object keys.
+      parsed["generationConfig"]["temperature"].as_f.should eq(0.7)
+      parsed["generationConfig"]["responseMimeType"].as_s.should eq("application/json")
+    end
+  end
+
   describe "registration" do
     it "registers itself under the \"google\" id" do
       ReqLLM::Registry.fetch("google").should be_a(ReqLLM::Providers::Google)

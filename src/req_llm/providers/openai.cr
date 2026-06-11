@@ -6,6 +6,7 @@ require "../context"
 require "../message"
 require "../content_part"
 require "../response"
+require "../schema"
 require "../usage"
 require "../options"
 
@@ -49,12 +50,46 @@ module ReqLLM::Providers
     end
 
     # Request step: serialize the typed state into the OpenAI chat wire body.
+    # For the `:object` operation (set by `generate_object`) it dispatches to
+    # `encode_object_body`, which adds the `response_format` json_schema directive
+    # so the model returns the structured object as JSON text in the assistant
+    # message content (decode is unchanged; the shared `unwrap_object` parses it).
     def encode_body(req : HTTP::Request) : HTTP::Request
       model = req.model.as(LLMDB::Model)
       context = req.context.as(ReqLLM::Context)
       opts = req.options.as(ReqLLM::Options::Validated)
-      req.body = encode_chat_body(model, context, opts)
+      if req.operation == :object && (schema = req.object_schema)
+        req.body = encode_object_body(
+          model, context, opts, schema, req.object_schema_name || "output_schema")
+      else
+        req.body = encode_chat_body(model, context, opts)
+      end
       req
+    end
+
+    # Build the Chat Completions request body for the `:object` operation: the
+    # normal chat body PLUS a `response_format: {type:"json_schema", json_schema:
+    # {name, strict:true, schema:<enforced>}}` directive. Mirrors upstream
+    # `prepare_json_schema_request` (openai.ex). The schema is run through
+    # `Schema.enforce_strict` so OpenAI strict mode accepts it (all properties
+    # required + additionalProperties:false). Public so a golden test can drive it
+    # directly with an explicit schema + name.
+    def encode_object_body(model : LLMDB::Model, context : ReqLLM::Context,
+                           opts : ReqLLM::Options::Validated,
+                           schema : Hash(String, JSON::Any), name : String) : String
+      body = chat_body_hash(model, context, opts)
+
+      json_schema = {
+        "name"   => JSON::Any.new(name),
+        "strict" => JSON::Any.new(true),
+        "schema" => JSON::Any.new(ReqLLM::Schema.enforce_strict(schema)),
+      } of String => JSON::Any
+      body["response_format"] = JSON::Any.new({
+        "type"        => JSON::Any.new("json_schema"),
+        "json_schema" => JSON::Any.new(json_schema),
+      } of String => JSON::Any)
+
+      body.to_json
     end
 
     # Build the Chat Completions request body as a JSON string. Public so the
@@ -76,6 +111,15 @@ module ReqLLM::Providers
     def encode_chat_body(model : LLMDB::Model, context : ReqLLM::Context,
                          opts : ReqLLM::Options::Validated,
                          *, stream : Bool? = nil) : String
+      chat_body_hash(model, context, opts, stream: stream).to_json
+    end
+
+    # Assemble the Chat Completions body as a Hash (shared by `encode_chat_body`
+    # and `encode_object_body`, which adds `response_format`). Same value-based
+    # `maybe_put` semantics described on `encode_chat_body`.
+    private def chat_body_hash(model : LLMDB::Model, context : ReqLLM::Context,
+                               opts : ReqLLM::Options::Validated,
+                               *, stream : Bool? = nil) : Hash(String, JSON::Any)
       body = {} of String => JSON::Any
       body["model"] = JSON::Any.new(model.id)
       body["messages"] = JSON::Any.new(encode_messages(context.messages))
@@ -133,7 +177,7 @@ module ReqLLM::Providers
         body["tools"] = JSON::Any.new(tools.map { |t| JSON::Any.new(encode_tool(t)) })
       end
 
-      body.to_json
+      body
     end
 
     # Configure a STREAMING chat request. Shares header/auth setup with the

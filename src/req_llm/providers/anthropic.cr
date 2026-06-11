@@ -6,8 +6,10 @@ require "../context"
 require "../message"
 require "../content_part"
 require "../response"
+require "../schema"
 require "../usage"
 require "../tool_call"
+require "../tool"
 require "../options"
 
 module ReqLLM::Providers
@@ -69,12 +71,58 @@ module ReqLLM::Providers
     end
 
     # Request step: serialize the typed state into the Anthropic Messages body.
+    # For the `:object` operation (set by `generate_object`) it dispatches to
+    # `encode_object_body`, which injects the synthetic `structured_output` tool
+    # and forces it via `tool_choice` so the model returns the structured object
+    # as that tool call's `input` (decode is unchanged; the `tool_use` block
+    # already decodes into a `structured_output` ToolCall whose raw arguments the
+    # shared `unwrap_object` reads).
     def encode_body(req : HTTP::Request) : HTTP::Request
       model = req.model.as(LLMDB::Model)
       context = req.context.as(ReqLLM::Context)
       opts = req.options.as(ReqLLM::Options::Validated)
-      req.body = encode_chat_body(model, context, opts)
+      if req.operation == :object && (schema = req.object_schema)
+        req.body = encode_object_body(
+          model, context, opts, schema, req.object_schema_name || "output_schema")
+      else
+        req.body = encode_chat_body(model, context, opts)
+      end
       req
+    end
+
+    # Build the Messages request body for the `:object` operation: the normal
+    # Messages body but with a single synthetic `structured_output` tool (object
+    # mode ignores any user tools — the forced tool IS the output channel) and a
+    # forced `tool_choice: {type:"tool", name:"structured_output"}`. Mirrors
+    # upstream `prepare_strict_tool_request` (anthropic.ex): the schema is run
+    # through `Schema.enforce_strict` (required = all keys + additional
+    # Properties:false) and encoded via the existing `encode_tool`. This is the
+    # MINIMAL `tool_choice` support OU2 adds (only the forced-tool shape; general
+    # `tool_choice` stays deferred). Public so a test can drive it directly with
+    # an explicit schema + name.
+    # `name` is part of the uniform `encode_object_body` signature shared across
+    # providers (so the `encode_body` dispatch is identical), but Anthropic
+    # INTENTIONALLY ignores it: the synthetic tool is always literally named
+    # `structured_output` (that fixed name is what `unwrap_object` looks for).
+    # The schema name is meaningful only on the OpenAI `response_format` path.
+    def encode_object_body(model : LLMDB::Model, context : ReqLLM::Context,
+                           opts : ReqLLM::Options::Validated,
+                           schema : Hash(String, JSON::Any), name : String) : String
+      body = chat_body_hash(model, context, opts)
+
+      tool = ReqLLM::Tool.new(
+        "structured_output",
+        "Generate structured output matching the provided schema",
+        ReqLLM::Schema.enforce_strict(schema),
+        strict: true,
+      )
+      body["tools"] = JSON::Any.new([JSON::Any.new(encode_tool(tool))])
+      body["tool_choice"] = JSON::Any.new({
+        "type" => JSON::Any.new("tool"),
+        "name" => JSON::Any.new("structured_output"),
+      } of String => JSON::Any)
+
+      body.to_json
     end
 
     # Configure a STREAMING Messages request. Shares header/auth setup with the
@@ -127,6 +175,17 @@ module ReqLLM::Providers
     def encode_chat_body(model : LLMDB::Model, context : ReqLLM::Context,
                          opts : ReqLLM::Options::Validated,
                          *, stream : Bool? = nil) : String
+      chat_body_hash(model, context, opts, stream: stream).to_json
+    end
+
+    # Assemble the Messages body as a Hash (shared by `encode_chat_body` and
+    # `encode_object_body`, which overrides `tools` with the synthetic tool and
+    # adds `tool_choice`). Same value-based `filter_nil_values` semantics
+    # described on `encode_chat_body`; the key insertion order is preserved so
+    # the non-object path stays byte-identical.
+    private def chat_body_hash(model : LLMDB::Model, context : ReqLLM::Context,
+                               opts : ReqLLM::Options::Validated,
+                               *, stream : Bool? = nil) : Hash(String, JSON::Any)
       body = {} of String => JSON::Any
       body["model"] = JSON::Any.new(model.id)
 
@@ -170,7 +229,7 @@ module ReqLLM::Providers
         body["tools"] = JSON::Any.new(tools.map { |t| JSON::Any.new(encode_tool(t)) })
       end
 
-      body.to_json
+      body
     end
 
     # Split messages into `{system, non_system}` by `role.system?`. System

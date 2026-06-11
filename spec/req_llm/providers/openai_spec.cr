@@ -145,6 +145,30 @@ describe ReqLLM::Providers::OpenAI do
     end
   end
 
+  describe "#encode_object_body" do
+    it "emits response_format json_schema with strict:true + enforced schema (golden)" do
+      ctx = ReqLLM::Context.new([
+        ReqLLM::Message.new(ReqLLM::Role::User, "Give me a person"),
+      ])
+      model = LLMDB.model("openai:gpt-4o-mini")
+      opts = ReqLLM::Options.validate(NamedTuple.new)
+
+      schema = {
+        "type"       => JSON::Any.new("object"),
+        "properties" => JSON::Any.new({
+          "name" => JSON::Any.new({"type" => JSON::Any.new("string")}),
+          "age"  => JSON::Any.new({"type" => JSON::Any.new("integer")}),
+        } of String => JSON::Any),
+        "required" => JSON::Any.new([JSON::Any.new("name")]),
+      } of String => JSON::Any
+
+      body = ReqLLM::Providers::OpenAI.new.encode_object_body(
+        model, ctx, opts, schema, "output_schema")
+
+      JSON.parse(body).should eq(JSON.parse(File.read("spec/golden/openai/object_basic.json")))
+    end
+  end
+
   describe "registration" do
     it "registers itself under the \"openai\" id" do
       ReqLLM::Registry.fetch("openai").should be_a(ReqLLM::Providers::OpenAI)

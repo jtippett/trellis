@@ -1,3 +1,4 @@
+require "json"
 require "http/headers"
 require "uri"
 require "./response" # HTTP::Response, referenced by the step alias return types
@@ -50,6 +51,14 @@ module ReqLLM::HTTP
     # :api_key and would reject it). `generate_text` sets this from the user's
     # `api_key:` arg; `BaseProvider` reads it when resolving auth.
     property api_key : String?
+    # Out-of-band structured-output schema for the `:object` operation (NOT a
+    # generation option). `generate_object` sets these from the caller's
+    # `schema`/`name`; each provider's `encode_body` reads `object_schema` to
+    # branch into its object-mode encoding (OpenAI `response_format`, Anthropic
+    # synthetic tool, Google `responseSchema`). The shared unwrap works off the
+    # decoded Response, but validation uses the schema.
+    property object_schema : Hash(String, JSON::Any)?
+    property object_schema_name : String?
 
     getter request_steps : Array({Symbol, RequestStepProc})
     getter response_steps : Array({Symbol, ResponseStepProc})
@@ -62,6 +71,8 @@ module ReqLLM::HTTP
       @options = nil
       @fixture = nil
       @api_key = nil
+      @object_schema = nil
+      @object_schema_name = nil
       @retry = nil
       @request_steps = [] of {Symbol, RequestStepProc}
       @response_steps = [] of {Symbol, ResponseStepProc}

@@ -177,6 +177,50 @@ describe ReqLLM::Providers::Anthropic do
     end
   end
 
+  describe "#encode_object_body" do
+    it "injects the synthetic structured_output tool (enforced schema) + forced tool_choice" do
+      ctx = ReqLLM::Context.new([
+        ReqLLM::Message.new(ReqLLM::Role::User, "Give me a person"),
+      ])
+      model = LLMDB.model("anthropic:claude-3-5-sonnet-20241022")
+      opts = ReqLLM::Options.validate(NamedTuple.new)
+
+      schema = {
+        "type"       => JSON::Any.new("object"),
+        "properties" => JSON::Any.new({
+          "name" => JSON::Any.new({"type" => JSON::Any.new("string")}),
+          "age"  => JSON::Any.new({"type" => JSON::Any.new("integer")}),
+        } of String => JSON::Any),
+        "required" => JSON::Any.new([JSON::Any.new("name")]),
+      } of String => JSON::Any
+
+      body = ReqLLM::Providers::Anthropic.new.encode_object_body(
+        model, ctx, opts, schema, "output_schema")
+      parsed = JSON.parse(body)
+
+      tools = parsed["tools"].as_a
+      tools.size.should eq(1)
+      tool = tools.first
+      tool["name"].as_s.should eq("structured_output")
+      tool["description"].as_s.should eq(
+        "Generate structured output matching the provided schema")
+
+      input_schema = tool["input_schema"]
+      # enforce_strict: required becomes ALL keys + additionalProperties:false.
+      input_schema["required"].as_a.map(&.as_s).sort.should eq(["age", "name"])
+      input_schema["additionalProperties"].as_bool.should be_false
+      input_schema["properties"]["name"]["type"].as_s.should eq("string")
+      input_schema["properties"]["age"]["type"].as_s.should eq("integer")
+
+      parsed["tool_choice"].should eq(JSON.parse(
+        %({"type":"tool","name":"structured_output"})))
+
+      # The Messages body is otherwise unchanged (max_tokens default, model).
+      parsed["model"].as_s.should eq("claude-3-5-sonnet-20241022")
+      parsed["max_tokens"].should eq(JSON::Any.new(1024_i64))
+    end
+  end
+
   describe "registration" do
     it "registers itself under the \"anthropic\" id" do
       ReqLLM::Registry.fetch("anthropic").should be_a(ReqLLM::Providers::Anthropic)
