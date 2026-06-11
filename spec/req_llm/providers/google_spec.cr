@@ -47,6 +47,42 @@ describe ReqLLM::Providers::Google do
       JSON.parse(body).should eq(JSON.parse(File.read("spec/golden/google/chat_tools.json")))
     end
 
+    it "deep-strips $schema and additionalProperties from tool parameters at every level" do
+      ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "Hi")])
+      model = LLMDB.model("google:gemini-2.0-flash")
+
+      # $schema at the top level; additionalProperties on a NESTED object property.
+      schema = {
+        "$schema"              => JSON::Any.new("https://json-schema.org/draft/2020-12/schema"),
+        "type"                 => JSON::Any.new("object"),
+        "additionalProperties" => JSON::Any.new(false),
+        "properties"           => JSON::Any.new({
+          "filter" => JSON::Any.new({
+            "type"                 => JSON::Any.new("object"),
+            "additionalProperties" => JSON::Any.new(false),
+            "properties"           => JSON::Any.new({
+              "q" => JSON::Any.new({"type" => JSON::Any.new("string")}),
+            } of String => JSON::Any),
+          } of String => JSON::Any),
+        } of String => JSON::Any),
+      } of String => JSON::Any
+      tool = ReqLLM::Tool.new("search", "Search", schema)
+
+      opts = ReqLLM::Options.validate({tools: [tool]})
+      parsed = JSON.parse(ReqLLM::Providers::Google.new.encode_chat_body(model, ctx, opts))
+
+      params = parsed["tools"][0]["functionDeclarations"][0]["parameters"]
+      # Stripped at the top level...
+      params.as_h.has_key?("$schema").should be_false
+      params.as_h.has_key?("additionalProperties").should be_false
+      # ...and on the nested object property.
+      nested = params["properties"]["filter"]
+      nested.as_h.has_key?("additionalProperties").should be_false
+      # Non-forbidden keys preserved at both levels.
+      params["type"].should eq(JSON::Any.new("object"))
+      nested["properties"]["q"]["type"].should eq(JSON::Any.new("string"))
+    end
+
     it "omits systemInstruction when there is no system message" do
       ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "Hi")])
       model = LLMDB.model("google:gemini-2.0-flash")
