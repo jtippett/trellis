@@ -77,6 +77,27 @@ module ReqLLM::Providers
       req
     end
 
+    # Configure a STREAMING Messages request. Shares header/auth setup with the
+    # non-streaming `attach` (via the overridden `apply_common_headers`, which
+    # sets `x-api-key` + `anthropic-version` and honours AUTH-SKIP-ON-REPLAY so a
+    # fixture replay needs no key), then adds the SSE `Accept` header Anthropic
+    # requires and encodes the body with `stream: true`. The request URL is
+    # already `<base>/v1/messages` from `prepare_request`. The producer fiber +
+    # `StreamAdapter` drive transport and decoding; no Steps.error/decode/usage
+    # are wired (the adapter handles non-2xx; the accumulator folds chunks).
+    # Mirrors the OpenAI sibling, which sets the same `stream: true` body flag;
+    # Anthropic ADDITIONALLY sets `Accept: text/event-stream`.
+    def attach_stream(req : HTTP::Request) : HTTP::Request
+      model = req.model.as(LLMDB::Model)
+      context = req.context.as(ReqLLM::Context)
+      opts = req.options.as(ReqLLM::Options::Validated)
+
+      apply_common_headers(req) # x-api-key + anthropic-version + Content-Type
+      req.headers["Accept"] = "text/event-stream"
+      req.body = encode_chat_body(model, context, opts, stream: true)
+      req
+    end
+
     # Build the Messages request body as a JSON string. Public so the canonical
     # golden test can exercise it without a full pipeline run. Ports
     # `Anthropic.Context.encode_request` + `build_request_body`: value-based

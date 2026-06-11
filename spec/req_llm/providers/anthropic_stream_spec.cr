@@ -6,6 +6,43 @@ private def event(data : String) : ReqLLM::SSE::Event
   ReqLLM::SSE::Event.new(data: data)
 end
 
+# Runs `block` in a fiber and FAILS FAST if it doesn't finish within `timeout`,
+# so a deadlock regression fails the spec instead of hanging CI forever (the
+# consuming paths block on Channel#receive?). Re-raises any exception the block
+# raised, so `expect_raises` still works when wrapped. Mirrors the helper in
+# `stream_text_spec.cr` / `stream_response_spec.cr`.
+private def within(timeout = 2.seconds, &block)
+  done = Channel(Exception?).new(1)
+  spawn do
+    block.call
+    done.send(nil)
+  rescue ex
+    done.send(ex)
+  end
+
+  select
+  when err = done.receive
+    raise err if err
+  when timeout(timeout)
+    fail("operation did not complete within #{timeout} (possible deadlock)")
+  end
+end
+
+# Runs `block` with ANTHROPIC_API_KEY removed, restoring the prior value after,
+# so the offline contract is proven (no key needed on fixture replay) without
+# leaking ENV state to other specs.
+private def without_anthropic_key(&)
+  saved = ENV["ANTHROPIC_API_KEY"]?
+  ENV.delete("ANTHROPIC_API_KEY")
+  yield
+ensure
+  if saved
+    ENV["ANTHROPIC_API_KEY"] = saved
+  else
+    ENV.delete("ANTHROPIC_API_KEY")
+  end
+end
+
 describe ReqLLM::Providers::Anthropic do
   describe "#decode_stream_event" do
     provider = ReqLLM::Providers::Anthropic.new
@@ -152,6 +189,82 @@ describe ReqLLM::Providers::Anthropic do
       resp.usage.not_nil!.input_tokens.should eq(11)
       resp.usage.not_nil!.output_tokens.should eq(7)
       resp.usage.not_nil!.cached_tokens.should eq(2)
+    end
+  end
+
+  describe "#attach_stream" do
+    it "sets Accept: text/event-stream, x-api-key, and a streaming body (with key)" do
+      prior_key = ENV["ANTHROPIC_API_KEY"]?
+      ENV["ANTHROPIC_API_KEY"] = "sk-ant-test"
+      ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "Hi")])
+      model = LLMDB::Model.new("anthropic", "claude-3-5-sonnet-20241022")
+      opts = ReqLLM::Options.validate(NamedTuple.new)
+      provider = ReqLLM::Providers::Anthropic.new
+      req = provider.prepare_request(:chat, model, ctx, opts)
+      provider.attach_stream(req)
+
+      req.headers["Accept"]?.should eq("text/event-stream")
+      req.headers["x-api-key"]?.should eq("sk-ant-test")
+      req.headers["anthropic-version"]?.should eq("2023-06-01")
+      req.headers["Content-Type"]?.should eq("application/json")
+      req.headers["Authorization"]?.should be_nil
+      body = req.body.as(String)
+      JSON.parse(body)["stream"].should eq(JSON::Any.new(true))
+      body.should contain(%("stream":true))
+    end
+
+    it "AUTH-SKIP-ON-REPLAY: omits x-api-key but sets Accept/anthropic-version (no key)" do
+      without_anthropic_key do
+        ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "Hi")])
+        model = LLMDB::Model.new("anthropic", "claude-3-5-sonnet-20241022")
+        opts = ReqLLM::Options.validate(NamedTuple.new)
+        provider = ReqLLM::Providers::Anthropic.new
+        req = provider.prepare_request(:chat, model, ctx, opts)
+        # The recorded chat_stream fixture exists, so will_replay? is true and
+        # no key is resolved.
+        req.fixture = "chat_stream"
+
+        provider.attach_stream(req)
+        req.headers["x-api-key"]?.should be_nil
+        req.headers["Accept"]?.should eq("text/event-stream")
+        req.headers["anthropic-version"]?.should eq("2023-06-01")
+      end
+    end
+  end
+
+  # End-to-end: ReqLLM.stream_text streams tokens offline from a recorded SSE
+  # fixture with NO ANTHROPIC_API_KEY set (auth skipped on replay). Exercises the
+  # real SSE parser + decode_stream_event + StreamResponse accumulator, and
+  # proves the split-usage per-field merge survives end to end.
+  describe "ReqLLM.stream_text (offline fixture replay)" do
+    it "streams ordered content chunks from the recorded SSE fixture with NO key" do
+      without_anthropic_key do
+        stream = ReqLLM.stream_text(
+          "anthropic:claude-3-5-sonnet-20241022", "Hi", fixture: "chat_stream")
+
+        within do
+          stream.text_stream.to_a.should eq(["Streaming ", "works."])
+        end
+      end
+    end
+
+    it "joins the stream into a Response (text, finish reason, split usage)" do
+      without_anthropic_key do
+        # Fresh stream — StreamResponse is single-consume, so join needs its own.
+        stream = ReqLLM.stream_text(
+          "anthropic:claude-3-5-sonnet-20241022", "Hi", fixture: "chat_stream")
+
+        within do
+          response = stream.join
+          response.text.should eq("Streaming works.")
+          response.finish_reason.should eq(ReqLLM::FinishReason::Stop)
+
+          usage = response.usage.not_nil!
+          usage.input_tokens.should eq(11)
+          usage.output_tokens.should eq(3)
+          usage.cached_tokens.should eq(2)
+        end
+      end
     end
   end
 end
