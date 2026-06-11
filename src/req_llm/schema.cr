@@ -84,14 +84,17 @@ module ReqLLM
       when "string"
         data.as_s? || raise mismatch(path, "string", data)
       when "integer"
-        # JSON has no integer type; require a whole number with no fractional part.
-        unless data.as_i64? || data.as_i?
-          raise mismatch(path, "integer", data)
-        end
+        # JSON has no distinct integer type, and models often emit an
+        # integer-valued field as `30.0`. Accept a true int OR a whole-valued
+        # float (fractional floats are rejected); this matters for the Anthropic
+        # tool-call / Google JSON paths (OU2/OU3) that lean on this validator.
+        ok = !data.as_i64?.nil? ||
+             (f = data.as_f?) && f.floor == f
+        raise mismatch(path, "integer", data) unless ok
       when "number"
-        unless data.as_f? || data.as_i64? || data.as_i?
-          raise mismatch(path, "number", data)
-        end
+        # `as_f?` already coerces an integer JSON value to Float64, so it covers
+        # both ints and floats.
+        data.as_f? || raise mismatch(path, "number", data)
       when "boolean"
         data.as_bool?.nil? && raise(mismatch(path, "boolean", data))
       when "null"

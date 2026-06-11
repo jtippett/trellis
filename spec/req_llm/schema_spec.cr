@@ -50,6 +50,19 @@ describe ReqLLM::Schema do
       end
     end
 
+    it "accepts a whole-valued float for an integer field but rejects a fractional one" do
+      schema = obj({
+        "age" => jany({"type" => jany("integer")}),
+      } of String => JSON::Any, required: ["age"])
+
+      # 30.0 is a valid integer value (JSON has no int/float distinction).
+      ReqLLM::Schema.validate(JSON.parse(%({"age":30.0})), schema)
+
+      expect_raises(ReqLLM::Error::Validation, /age/) do
+        ReqLLM::Schema.validate(JSON.parse(%({"age":30.5})), schema)
+      end
+    end
+
     it "raises on a nested object property mismatch" do
       schema = obj({
         "user" => jany(obj({
