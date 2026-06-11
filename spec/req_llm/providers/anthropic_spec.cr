@@ -1,4 +1,5 @@
 require "../../spec_helper"
+require "file_utils"
 
 describe ReqLLM::Providers::Anthropic do
   describe "registration" do
@@ -35,6 +36,7 @@ describe ReqLLM::Providers::Anthropic do
 
   describe "auth headers" do
     it "sets x-api-key + anthropic-version + Content-Type and NO Authorization" do
+      prior_key = ENV["ANTHROPIC_API_KEY"]?
       ENV["ANTHROPIC_API_KEY"] = "sk-ant-test"
       ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "Hi")])
       model = LLMDB::Model.new("anthropic", "claude-3-5-sonnet-20241022")
@@ -48,10 +50,15 @@ describe ReqLLM::Providers::Anthropic do
       req.headers["Content-Type"]?.should eq("application/json")
       req.headers["Authorization"]?.should be_nil
     ensure
-      ENV.delete("ANTHROPIC_API_KEY")
+      if pk = prior_key
+        ENV["ANTHROPIC_API_KEY"] = pk
+      else
+        ENV.delete("ANTHROPIC_API_KEY")
+      end
     end
 
     it "AUTH-SKIP-ON-REPLAY: does not resolve a key when replaying an existing fixture" do
+      prior_key = ENV["ANTHROPIC_API_KEY"]?
       ENV.delete("ANTHROPIC_API_KEY")
       tmp = File.tempname("cr_llm_fixtures")
       ReqLLM::Fixture.base_dir = tmp
@@ -78,6 +85,12 @@ describe ReqLLM::Providers::Anthropic do
         req.headers["anthropic-version"]?.should eq("2023-06-01")
       ensure
         ReqLLM::Fixture.base_dir = ReqLLM::Fixture::DEFAULT_BASE_DIR
+        FileUtils.rm_rf(tmp)
+        if pk = prior_key
+          ENV["ANTHROPIC_API_KEY"] = pk
+        else
+          ENV.delete("ANTHROPIC_API_KEY")
+        end
       end
     end
   end
