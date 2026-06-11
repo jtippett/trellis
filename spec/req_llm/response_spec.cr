@@ -54,4 +54,47 @@ describe ReqLLM::Response do
     ReqLLM::FinishReason.from_wire("SAFETY").should eq(ReqLLM::FinishReason::ContentFilter)
     ReqLLM::FinishReason.from_wire("OTHER").should eq(ReqLLM::FinishReason::Other)
   end
+
+  describe "#unwrap_object" do
+    it "extracts the object from a structured_output tool call's raw arguments" do
+      tc = ReqLLM::ToolCall.new("call_1", "structured_output", %({"name":"Alice","age":30}))
+      msg = ReqLLM::Message.new(ReqLLM::Role::Assistant, "", tool_calls: [tc])
+      resp = ReqLLM::Response.new(model: "anthropic:claude", message: msg)
+
+      obj = resp.unwrap_object
+      obj["name"].as_s.should eq("Alice")
+      obj["age"].as_i.should eq(30)
+    end
+
+    it "extracts a top-level array from a structured_output tool call" do
+      tc = ReqLLM::ToolCall.new("call_1", "structured_output", %([1,2,3]))
+      msg = ReqLLM::Message.new(ReqLLM::Role::Assistant, "", tool_calls: [tc])
+      resp = ReqLLM::Response.new(model: "anthropic:claude", message: msg)
+
+      resp.unwrap_object.as_a.map(&.as_i).should eq([1, 2, 3])
+    end
+
+    it "parses a JSON object from assistant text (json_schema mode)" do
+      msg = ReqLLM::Message.new(ReqLLM::Role::Assistant, %({"name":"Bob"}))
+      resp = ReqLLM::Response.new(model: "openai:gpt-4o-mini", message: msg)
+
+      resp.unwrap_object["name"].as_s.should eq("Bob")
+    end
+
+    it "parses a top-level JSON array from assistant text" do
+      msg = ReqLLM::Message.new(ReqLLM::Role::Assistant, %(["a","b"]))
+      resp = ReqLLM::Response.new(model: "openai:gpt-4o-mini", message: msg)
+
+      resp.unwrap_object.as_a.map(&.as_s).should eq(["a", "b"])
+    end
+
+    it "raises Error::Validation when neither tool call nor text yields JSON" do
+      msg = ReqLLM::Message.new(ReqLLM::Role::Assistant, "not json at all")
+      resp = ReqLLM::Response.new(model: "openai:gpt-4o-mini", message: msg)
+
+      expect_raises(ReqLLM::Error::Validation, /no structured output/) do
+        resp.unwrap_object
+      end
+    end
+  end
 end
