@@ -1,0 +1,31 @@
+name: live
+
+# Opt-in live integration smoke tests against the real provider APIs. Manual
+# only (never on push/PR) and gated in-spec on TRELLIS_LIVE=1 + the provider
+# key, so a provider whose secret isn't configured simply pends rather than
+# fails — the workflow is usable with any subset of keys.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    env:
+      TRELLIS_LIVE: "1"
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: "1.20.2"
+
+      - name: Live specs
+        run: crystal spec spec/live --tag live
