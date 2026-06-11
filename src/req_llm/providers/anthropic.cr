@@ -100,6 +100,11 @@ module ReqLLM::Providers
     # MINIMAL `tool_choice` support OU2 adds (only the forced-tool shape; general
     # `tool_choice` stays deferred). Public so a test can drive it directly with
     # an explicit schema + name.
+    # `name` is part of the uniform `encode_object_body` signature shared across
+    # providers (so the `encode_body` dispatch is identical), but Anthropic
+    # INTENTIONALLY ignores it: the synthetic tool is always literally named
+    # `structured_output` (that fixed name is what `unwrap_object` looks for).
+    # The schema name is meaningful only on the OpenAI `response_format` path.
     def encode_object_body(model : LLMDB::Model, context : ReqLLM::Context,
                            opts : ReqLLM::Options::Validated,
                            schema : Hash(String, JSON::Any), name : String) : String
