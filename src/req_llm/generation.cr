@@ -108,6 +108,13 @@ module ReqLLM
   # `response.object`.
   #
   # As with `generate_text`, a `fixture:` makes the run fully offline (no key).
+  #
+  # CAVEAT: a TOP-LEVEL ARRAY schema (`{"type" => "array", ...}`) works only on
+  # the OpenAI/Google (json_schema) paths — `unwrap_object` and the validator
+  # accept an array, and those providers emit it as JSON text. Anthropic routes
+  # through the synthetic `structured_output` tool, whose `input_schema` the
+  # Messages API requires to be an OBJECT, so a live Anthropic call with an
+  # array root would fail. Wrap an array in an object property for portability.
   def self.generate_object(spec : String, prompt : String | Context,
                            schema : Hash(String, JSON::Any), *,
                            name : String = "output_schema",
