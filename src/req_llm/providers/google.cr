@@ -71,6 +71,40 @@ module ReqLLM::Providers
       end
     end
 
+    # Configure a STREAMING request. Unlike OpenAI/Anthropic (which flip a body
+    # `stream` flag), Gemini streaming is ENDPOINT-based: the same
+    # `generateContent` body is POSTed to the `:streamGenerateContent` operation
+    # with `?alt=sse` framing. So this REWRITES the URL path + query and leaves
+    # the body byte-identical to the non-streaming `encode_chat_body` (NO stream
+    # flag). Header/auth setup is shared with the non-streaming `attach` via the
+    # overridden `apply_common_headers` (sets `x-goog-api-key` + `Content-Type`,
+    # honouring AUTH-SKIP-ON-REPLAY so a fixture replay needs no key); we then add
+    # the SSE `Accept` header. The producer fiber + `StreamAdapter` drive
+    # transport and decoding (`StreamAdapter.live` posts to `uri.request_target`,
+    # so `?alt=sse` MUST live in the URL, not just a header). No
+    # Steps.error/decode/usage are wired (the adapter handles non-2xx; the
+    # accumulator folds chunks).
+    def attach_stream(req : HTTP::Request) : HTTP::Request
+      model = req.model.as(LLMDB::Model)
+      context = req.context.as(ReqLLM::Context)
+      opts = req.options.as(ReqLLM::Options::Validated)
+
+      # Rewrite :generateContent -> :streamGenerateContent and request SSE
+      # framing. `sub` replaces the first occurrence only — safe, since the model
+      # id cannot contain ":generateContent". Dup + reassign so we never mutate a
+      # shared URI in place.
+      uri = req.url.dup
+      uri.path = uri.path.sub(":generateContent", ":streamGenerateContent")
+      uri.query = "alt=sse"
+      req.url = uri
+
+      apply_common_headers(req) # x-goog-api-key + Content-Type (AUTH-SKIP-ON-REPLAY)
+      req.headers["Accept"] = "text/event-stream"
+      # Body is identical to non-streaming; Gemini has NO body stream flag.
+      req.body = encode_chat_body(model, context, opts)
+      req
+    end
+
     # Request step: serialize the typed state into the Gemini request body.
     def encode_body(req : HTTP::Request) : HTTP::Request
       model = req.model.as(LLMDB::Model)

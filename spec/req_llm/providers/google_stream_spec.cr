@@ -24,6 +24,42 @@ private def google_req
   req
 end
 
+# Runs `block` in a fiber and FAILS FAST if it doesn't finish within `timeout`,
+# so a deadlock regression fails the spec instead of hanging CI forever (the
+# consuming paths block on Channel#receive?). Re-raises any exception the block
+# raised. Mirrors the helper in `anthropic_stream_spec.cr`.
+private def within(timeout = 2.seconds, &block)
+  done = Channel(Exception?).new(1)
+  spawn do
+    block.call
+    done.send(nil)
+  rescue ex
+    done.send(ex)
+  end
+
+  select
+  when err = done.receive
+    raise err if err
+  when timeout(timeout)
+    fail("operation did not complete within #{timeout} (possible deadlock)")
+  end
+end
+
+# Runs `block` with GOOGLE_API_KEY removed, restoring the prior value after, so
+# the offline contract is proven (no key needed on fixture replay) without
+# leaking ENV state to other specs.
+private def without_google_key(&)
+  saved = ENV["GOOGLE_API_KEY"]?
+  ENV.delete("GOOGLE_API_KEY")
+  yield
+ensure
+  if saved
+    ENV["GOOGLE_API_KEY"] = saved
+  else
+    ENV.delete("GOOGLE_API_KEY")
+  end
+end
+
 describe ReqLLM::Providers::Google do
   describe "#decode_stream_event" do
     provider = ReqLLM::Providers::Google.new
@@ -236,6 +272,89 @@ describe ReqLLM::Providers::Google do
       streamed.message.not_nil!.content.map(&.type).should eq(
         decoded.message.not_nil!.content.map(&.type))
       streamed.text.should eq(decoded.text)
+    end
+  end
+
+  describe "#attach_stream" do
+    it "rewrites the URL to :streamGenerateContent?alt=sse, sets Accept + x-goog-api-key, and a body with NO stream flag (with key)" do
+      prior_key = ENV["GOOGLE_API_KEY"]?
+      ENV["GOOGLE_API_KEY"] = "test-google-key"
+      ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "Hi")])
+      model = LLMDB::Model.new("google", "gemini-2.0-flash")
+      opts = ReqLLM::Options.validate(NamedTuple.new)
+      provider = ReqLLM::Providers::Google.new
+      req = provider.prepare_request(:chat, model, ctx, opts)
+      provider.attach_stream(req)
+
+      req.url.path.ends_with?(":streamGenerateContent").should be_true
+      req.url.query.should eq("alt=sse")
+      req.url.request_target.should contain("?alt=sse")
+      req.headers["Accept"]?.should eq("text/event-stream")
+      req.headers["x-goog-api-key"]?.should eq("test-google-key")
+      req.headers["Content-Type"]?.should eq("application/json")
+      req.headers["Authorization"]?.should be_nil
+
+      body = JSON.parse(req.body.as(String))
+      body.as_h.has_key?("stream").should be_false
+    ensure
+      if pk = prior_key
+        ENV["GOOGLE_API_KEY"] = pk
+      else
+        ENV.delete("GOOGLE_API_KEY")
+      end
+    end
+
+    it "AUTH-SKIP-ON-REPLAY: omits x-goog-api-key but rewrites URL + sets Accept (no key)" do
+      without_google_key do
+        ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "Hi")])
+        model = LLMDB::Model.new("google", "gemini-2.0-flash")
+        opts = ReqLLM::Options.validate(NamedTuple.new)
+        provider = ReqLLM::Providers::Google.new
+        req = provider.prepare_request(:chat, model, ctx, opts)
+        # The recorded chat_stream fixture exists, so will_replay? is true and no
+        # key is resolved.
+        req.fixture = "chat_stream"
+
+        provider.attach_stream(req)
+        req.headers["x-goog-api-key"]?.should be_nil
+        req.headers["Accept"]?.should eq("text/event-stream")
+        req.url.path.ends_with?(":streamGenerateContent").should be_true
+        req.url.query.should eq("alt=sse")
+      end
+    end
+  end
+
+  # End-to-end: ReqLLM.stream_text streams tokens offline from a recorded SSE
+  # fixture with NO GOOGLE_API_KEY set (auth skipped on replay). Exercises the
+  # real SSE parser + decode_stream_event + StreamResponse accumulator.
+  describe "ReqLLM.stream_text (offline fixture replay)" do
+    it "streams ordered content chunks from the recorded SSE fixture with NO key" do
+      without_google_key do
+        stream = ReqLLM.stream_text(
+          "google:gemini-2.0-flash", "Hi", fixture: "chat_stream")
+
+        within do
+          stream.text_stream.to_a.should eq(["Streaming ", "works."])
+        end
+      end
+    end
+
+    it "joins the stream into a Response (text, finish reason, usage)" do
+      without_google_key do
+        # Fresh stream — StreamResponse is single-consume, so join needs its own.
+        stream = ReqLLM.stream_text(
+          "google:gemini-2.0-flash", "Hi", fixture: "chat_stream")
+
+        within do
+          response = stream.join
+          response.text.should eq("Streaming works.")
+          response.finish_reason.should eq(ReqLLM::FinishReason::Stop)
+
+          usage = response.usage.not_nil!
+          usage.input_tokens.should eq(11)
+          usage.output_tokens.should eq(3)
+        end
+      end
     end
   end
 end
