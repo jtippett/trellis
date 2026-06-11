@@ -581,6 +581,13 @@ module ReqLLM::Providers
     # where `i` is the functionCall's position among functionCall parts in THIS
     # event (so parallel calls co-located in one frame get distinct indices) and
     # `id` is `functionCall["id"]` when present else a generated id.
+    #
+    # KNOWN LIMITATION (deferred): `i` resets to 0 per event, and the
+    # `ChunkAccumulator` groups tool calls solely by `metadata["index"]`. Gemini
+    # delivers all `functionCall` parts of a response COMPLETE and CO-LOCATED in a
+    # single content frame (upstream's primary decode arm assumes this), so this
+    # is correct in practice. If Gemini ever split parallel function calls across
+    # SEPARATE frames they would both land at index 0 and merge into one call.
     private def extract_chunks_from_parts(parts : Array(JSON::Any)) : Array(ReqLLM::StreamChunk)
       chunks = [] of ReqLLM::StreamChunk
       fc_index = 0
