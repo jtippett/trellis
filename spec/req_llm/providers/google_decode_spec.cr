@@ -69,6 +69,25 @@ describe ReqLLM::Providers::Google do
       call.args_map["location"].should eq(JSON::Any.new("Paris"))
     end
 
+    it "keeps Length (does NOT upgrade) for a truncated tool call (MAX_TOKENS + functionCall)" do
+      provider = ReqLLM::Providers::Google.new
+      # functionCall present BUT finishReason is MAX_TOKENS: the args may be
+      # incomplete, so the truncation signal must survive (only STOP upgrades).
+      body = {
+        "candidates" => [{
+          "content" => {"role" => "model", "parts" => [
+            {"functionCall" => {"name" => "get_weather", "args" => {"loc" => "Par"}}},
+          ]},
+          "finishReason" => "MAX_TOKENS",
+        }],
+      }.to_json
+      _, resp = provider.decode_response(google_req, google_response(body))
+
+      decoded = resp.decoded.not_nil!
+      decoded.finish_reason.should eq(ReqLLM::FinishReason::Length)
+      decoded.tool_calls.size.should eq(1)
+    end
+
     it "uses functionCall id when present, else generates one" do
       provider = ReqLLM::Providers::Google.new
       body = {

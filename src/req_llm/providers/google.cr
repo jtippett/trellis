@@ -387,15 +387,19 @@ module ReqLLM::Providers
         tool_calls: tool_calls.empty? ? nil : tool_calls,
       )
 
-      # finish_reason: Gemini returns "STOP" even when the candidate carries
-      # `functionCall` parts; the meaningful finish is ToolCalls (mirrors
-      # google.ex:1764-1768). Otherwise map the wire token.
-      finish_reason =
-        if tool_calls.empty?
-          ReqLLM::FinishReason.from_wire(candidate.try(&.["finishReason"]?).try(&.as_s?))
-        else
-          ReqLLM::FinishReason::ToolCalls
-        end
+      # finish_reason: map the wire token, then UPGRADE Stop -> ToolCalls when
+      # the candidate carries `functionCall` parts. Gemini reports "STOP"
+      # alongside function calls, where the meaningful finish is ToolCalls
+      # (upstream google.ex:1764-1768 gates the override on "STOP" exactly). The
+      # gate matters: a TRUNCATED tool call ("MAX_TOKENS" + functionCall) must
+      # stay Length so the incomplete-args signal isn't lost. This is the SAME
+      # rule the streaming `ChunkAccumulator#finish` applies, so a folded stream
+      # yields the identical finish_reason as this decode (stream.join == decode).
+      finish_reason = ReqLLM::FinishReason.from_wire(
+        candidate.try(&.["finishReason"]?).try(&.as_s?))
+      if finish_reason.stop? && !tool_calls.empty?
+        finish_reason = ReqLLM::FinishReason::ToolCalls
+      end
 
       usage = normalize_google_usage(data["usageMetadata"]?)
 
