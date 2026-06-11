@@ -30,6 +30,7 @@ require "./llmdb/catalog"
 require "./llmdb"
 require "./req_llm/providers/openai"
 require "./req_llm/providers/anthropic"
+require "./req_llm/providers/google"
 require "./req_llm/generation"
 
 module ReqLLM

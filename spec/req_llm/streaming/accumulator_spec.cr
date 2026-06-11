@@ -157,4 +157,40 @@ describe ReqLLM::ChunkAccumulator do
     resp.usage.not_nil!.input_tokens.should eq(10)
     resp.usage.not_nil!.output_tokens.should eq(5)
   end
+
+  # FINISH-UPGRADE (GU4): a response that produced tool calls finishes as
+  # ToolCalls. Gemini reports finishReason "STOP" even with functionCall parts,
+  # and the part/finish frames may arrive separately, so resolving it here makes
+  # the result frame-order-independent. Only Stop is upgraded; Length/
+  # ContentFilter keep their real reason. This is a verified NO-OP for OpenAI
+  # ("tool_calls") and Anthropic ("tool_use"), which never pair Stop with tool
+  # calls.
+  describe "finish-reason upgrade (Stop -> ToolCalls when tool calls present)" do
+    it "upgrades a Stop finish to ToolCalls when tool calls were accumulated" do
+      acc = ReqLLM::ChunkAccumulator.new
+      acc << tool_chunk(0, id: "call_1", name: "get_weather", fragment: %({"location":"Paris"}))
+      acc << meta_chunk(finish_reason: "stop")
+
+      resp = acc.finish("google:gemini-2.0-flash")
+      resp.finish_reason.should eq(ReqLLM::FinishReason::ToolCalls)
+    end
+
+    it "does NOT upgrade Length (truncated mid-call keeps its real reason)" do
+      acc = ReqLLM::ChunkAccumulator.new
+      acc << tool_chunk(0, id: "call_1", name: "get_weather", fragment: %({"loc))
+      acc << meta_chunk(finish_reason: "length")
+
+      resp = acc.finish("google:gemini-2.0-flash")
+      resp.finish_reason.should eq(ReqLLM::FinishReason::Length)
+    end
+
+    it "leaves a Stop finish untouched when NO tool calls were accumulated" do
+      acc = ReqLLM::ChunkAccumulator.new
+      acc << ReqLLM::StreamChunk.text("Hi")
+      acc << meta_chunk(finish_reason: "stop")
+
+      resp = acc.finish("google:gemini-2.0-flash")
+      resp.finish_reason.should eq(ReqLLM::FinishReason::Stop)
+    end
+  end
 end

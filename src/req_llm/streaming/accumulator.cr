@@ -48,6 +48,19 @@ module ReqLLM
   #     providers that split usage across frames (Anthropic: input/cache at
   #     message_start, output at message_delta) accumulate complete totals; for
   #     a single-frame provider (OpenAI) this equals replace.
+  #
+  # ## Finish-reason upgrade (Stop -> ToolCalls)
+  #
+  # `finish` upgrades a resolved `Stop` finish reason to `ToolCalls` whenever any
+  # tool calls were accumulated. Gemini reports finishReason "STOP" even when the
+  # candidate carries `functionCall` parts, and the part frame and the finish
+  # frame may arrive separately, so resolving this here (rather than via a fragile
+  # per-frame override) makes the result frame-order-independent. This is a
+  # verified NO-OP for OpenAI (wire "tool_calls") and Anthropic (wire "tool_use"),
+  # which already resolve to `ToolCalls` and never pair `Stop` with tool calls.
+  # Only `Stop` is upgraded — `Length`/`ContentFilter` (a truncated or filtered
+  # mid-call response) keep their real reason. Mirrors the GU3 non-streaming
+  # decode gate so `stream.join == decode`.
   class ChunkAccumulator
     # Per-index accumulation state for a streaming tool call.
     private class ToolCallBuilder
@@ -128,6 +141,18 @@ module ReqLLM
       # `FinishReason.from_wire(nil) == Other` (never nil), and absent usage is a
       # zeroed `Usage` (decode_usage never returns nil), not nil.
       finish_reason = FinishReason.from_wire(@finish_reason_wire)
+
+      # A response that produced tool calls finishes as ToolCalls. Some providers
+      # (Gemini) report finishReason "STOP" even with functionCall parts, and the
+      # part/finish frames may not co-locate; resolving it here makes the result
+      # frame-order-independent. NO-OP for OpenAI ("tool_calls") and Anthropic
+      # ("tool_use") — they resolve to ToolCalls already and never pair Stop with
+      # tool calls. Only Stop is upgraded; Length/ContentFilter keep their real
+      # reason (a truncated/filtered mid-call response must not look like a clean
+      # tool call). Mirrors the GU3 non-streaming decode gate exactly.
+      if finish_reason.stop? && !@tool_order.empty?
+        finish_reason = FinishReason::ToolCalls
+      end
 
       Response.new(
         model: model,
