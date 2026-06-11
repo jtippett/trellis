@@ -4,7 +4,8 @@ A faithful Crystal port of Elixir's [`req_llm`](https://github.com/agentjido/req
 a struct/pipeline LLM client for **OpenAI**, **Anthropic**, and **Google**, covering
 text generation, streaming, tool calls, and structured output.
 
-The name is **CR**-ystal + **LLM**. Licensed under **Apache-2.0**.
+The name nods to the **LL** of LLM (tre**ll**is) and to its structured, woven-together
+pipeline. Licensed under **Apache-2.0**.
 
 ## Install
 
