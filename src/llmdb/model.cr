@@ -1,7 +1,7 @@
 module LLMDB
   # A single catalog entry, mirroring the models.dev model shape consumed by the
   # `llm_db` registry. Reopens the empty `class LLMDB::Model` forward-declared in
-  # `src/req_llm/http/request.cr` (MUST remain a `class`, never a `struct`).
+  # `src/trellis/http/request.cr` (MUST remain a `class`, never a `struct`).
   #
   # Field mapping to the models.dev JSON shape (see req_llm/guides/model-metadata.md):
   #   provider   <- "provider"   (string id; exposed as a String via #provider)
@@ -44,7 +44,7 @@ module LLMDB
       end
 
       # The input/output pair as a NamedTuple, so this catalog `Cost` struct can
-      # be passed straight to `ReqLLM::Usage#cost(pricing)` (which indexes
+      # be passed straight to `Trellis::Usage#cost(pricing)` (which indexes
       # `pricing[:input]` / `pricing[:output]`).
       def to_pricing : NamedTuple(input: Float64, output: Float64)
         {input: input, output: output}

@@ -1,6 +1,6 @@
-# cr_llm examples
+# trellis examples
 
-Runnable examples for the `cr_llm` library. Each is a standalone Crystal program;
+Runnable examples for the `trellis` library. Each is a standalone Crystal program;
 `require` paths resolve relative to the file, so you can run them from any directory.
 
 ## Start here — no key needed
@@ -11,7 +11,7 @@ crystal run examples/offline_text.cr
 
 `offline_text.cr` replays a recorded fixture (`examples/fixtures/openai/hello.json`)
 through the real `generate_text` pipeline. No network, no API key — the fastest way
-to see cr_llm work end-to-end. It's the same record/replay mechanism the test suite
+to see trellis work end-to-end. It's the same record/replay mechanism the test suite
 uses.
 
 ## Live examples — require an OpenAI key
@@ -26,7 +26,7 @@ crystal run examples/basic_text.cr     # one-shot text generation
 crystal run examples/tool_calling.cr   # model picks a get_weather tool call
 ```
 
-Both load the project-root `.env` automatically via `ReqLLM::Keys.load_env_file`.
+Both load the project-root `.env` automatically via `Trellis::Keys.load_env_file`.
 
 ## What they demonstrate
 
@@ -38,7 +38,7 @@ Both load the project-root `.env` automatically via `ReqLLM::Keys.load_env_file`
 
 ## Error handling
 
-cr_llm raises typed `ReqLLM::Error` exceptions (e.g. a missing key is
-`ReqLLM::Error::Invalid::Parameter` with a clear message). The live examples
-`rescue ReqLLM::Error` and print a one-line message instead of a stack trace —
+trellis raises typed `Trellis::Error` exceptions (e.g. a missing key is
+`Trellis::Error::Invalid::Parameter` with a clear message). The live examples
+`rescue Trellis::Error` and print a one-line message instead of a stack trace —
 the pattern an app or CLI should follow.

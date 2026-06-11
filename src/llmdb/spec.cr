@@ -18,7 +18,7 @@ module LLMDB
 
     def self.parse(spec : String) : Spec
       unless spec.includes?(':')
-        raise ReqLLM::Error::Invalid::Parameter.new(
+        raise Trellis::Error::Invalid::Parameter.new(
           "Invalid model spec #{spec.inspect}: expected \"provider:model\"")
       end
 
@@ -26,7 +26,7 @@ module LLMDB
       model, _, tag = rest.partition('@')
 
       if provider_id.empty? || model.empty?
-        raise ReqLLM::Error::Invalid::Parameter.new(
+        raise Trellis::Error::Invalid::Parameter.new(
           "Invalid model spec #{spec.inspect}: provider and model must be non-empty")
       end
 

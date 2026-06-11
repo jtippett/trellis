@@ -21,15 +21,15 @@ describe LLMDB::Spec do
   end
 
   it "rejects a spec without a colon" do
-    expect_raises(ReqLLM::Error::Invalid::Parameter) { LLMDB::Spec.parse("gpt-4o") }
+    expect_raises(Trellis::Error::Invalid::Parameter) { LLMDB::Spec.parse("gpt-4o") }
   end
 
   it "rejects a spec with an empty model" do
-    expect_raises(ReqLLM::Error::Invalid::Parameter) { LLMDB::Spec.parse("openai:") }
+    expect_raises(Trellis::Error::Invalid::Parameter) { LLMDB::Spec.parse("openai:") }
   end
 
   it "rejects a spec with an empty provider" do
-    expect_raises(ReqLLM::Error::Invalid::Parameter) { LLMDB::Spec.parse(":model") }
+    expect_raises(Trellis::Error::Invalid::Parameter) { LLMDB::Spec.parse(":model") }
   end
 
   it "parses any provider string (no curated provider list)" do

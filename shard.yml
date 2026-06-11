@@ -1,9 +1,11 @@
-name: cr_llm
+name: trellis
 version: 0.1.0
 crystal: ">= 1.20.0"
 license: Apache-2.0
+description: A faithful Crystal port of Elixir's req_llm -- a struct/pipeline LLM client for OpenAI, Anthropic, and Google.
+homepage: https://github.com/jtippett/trellis
 authors:
   - James Tippett <james@lvl4.net>
 targets:
-  cr_llm:
-    main: src/cr_llm.cr
+  trellis:
+    main: src/trellis.cr
