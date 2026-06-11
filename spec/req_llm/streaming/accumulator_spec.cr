@@ -128,4 +128,33 @@ describe ReqLLM::ChunkAccumulator do
     acc.add(ReqLLM::StreamChunk.text("a")).add(ReqLLM::StreamChunk.text("b"))
     acc.finish("m").text.should eq("ab")
   end
+
+  # USAGE MERGE (AU4): usage meta chunks merge per-field (larger value wins)
+  # rather than wholesale replace, so providers that split usage across frames
+  # (Anthropic: input/cache at message_start, output at message_delta)
+  # accumulate complete totals. For a single-frame provider (OpenAI) where only
+  # one frame carries usage, the merge-from-nil collapses to that lone value.
+  it "yields the lone final usage when only the terminal frame carries it (OpenAI no-regression)" do
+    acc = ReqLLM::ChunkAccumulator.new
+    # An earlier meta frame carries finish_reason but NO usage...
+    acc << meta_chunk(finish_reason: "stop")
+    # ...and the terminal frame carries the only usage object.
+    acc << meta_chunk(usage: usage_obj(11, 7))
+
+    resp = acc.finish("openai:gpt-4o")
+    resp.usage.not_nil!.input_tokens.should eq(11)
+    resp.usage.not_nil!.output_tokens.should eq(7)
+    resp.finish_reason.should eq(ReqLLM::FinishReason::Stop)
+  end
+
+  it "merges split usage across frames per-field (Anthropic split-usage)" do
+    acc = ReqLLM::ChunkAccumulator.new
+    # Frame A carries only input; frame B carries only output.
+    acc << meta_chunk(usage: {"input_tokens" => JSON::Any.new(10_i64)})
+    acc << meta_chunk(usage: {"output_tokens" => JSON::Any.new(5_i64)})
+
+    resp = acc.finish("anthropic:claude-3-5-sonnet-20241022")
+    resp.usage.not_nil!.input_tokens.should eq(10)
+    resp.usage.not_nil!.output_tokens.should eq(5)
+  end
 end

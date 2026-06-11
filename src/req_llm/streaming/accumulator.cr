@@ -44,7 +44,10 @@ module ReqLLM
   #   * `metadata["usage"]` (object) — token counts with the CANONICAL keys
   #     `input_tokens`, `output_tokens`, `reasoning_tokens`, `cached_tokens`
   #     (Ints; missing → 0). SU4 normalises the provider's usage into this
-  #     shape. Latest meta usage wins (terminal capture).
+  #     shape. Usage meta chunks MERGE per-field (larger value wins), so
+  #     providers that split usage across frames (Anthropic: input/cache at
+  #     message_start, output at message_delta) accumulate complete totals; for
+  #     a single-frame provider (OpenAI) this equals replace.
   class ChunkAccumulator
     # Per-index accumulation state for a streaming tool call.
     private class ToolCallBuilder
@@ -165,9 +168,24 @@ module ReqLLM
       end
       if usage_any = chunk.metadata["usage"]?
         if parsed = parse_usage(usage_any)
-          @usage = parsed
+          @usage = merge_usage(@usage, parsed)
         end
       end
+    end
+
+    # Per-field max merge: a provider may split usage across frames (Anthropic:
+    # input/cache at message_start, output at message_delta). Token counts are
+    # monotonic cumulative, so max is order-independent and correct. For a
+    # single-frame provider (OpenAI) — where only one frame carries usage — the
+    # merge-from-nil collapses to that lone value (equivalent to replace).
+    private def merge_usage(old : Usage?, new : Usage) : Usage
+      return new unless o = old
+      Usage.new(
+        input_tokens: Math.max(o.input_tokens, new.input_tokens),
+        output_tokens: Math.max(o.output_tokens, new.output_tokens),
+        reasoning_tokens: Math.max(o.reasoning_tokens, new.reasoning_tokens),
+        cached_tokens: Math.max(o.cached_tokens, new.cached_tokens),
+      )
     end
 
     private def parse_usage(any : JSON::Any) : Usage?

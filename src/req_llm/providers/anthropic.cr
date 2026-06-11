@@ -421,6 +421,159 @@ module ReqLLM::Providers
       {req, resp}
     end
 
+    # Decode ONE Anthropic Messages SSE event into zero-or-more `StreamChunk`s.
+    # PURE: no IO/concurrency. The chunks emit EXACTLY the metadata the
+    # `ChunkAccumulator` reads, so folding a stream yields the same `Response` as
+    # the non-streaming `decode_response`. Ports the stateless 2-arg
+    # `Anthropic.Response.decode_stream_event/2` (the thinking-signature /
+    # reasoning-details machinery, which needs cross-event state, is deferred —
+    # `content_block_stop` therefore yields `[]`).
+    #
+    # Anthropic SPLITS usage across frames: `message_start` carries
+    # `input_tokens` + `cache_read_input_tokens`, while `message_delta` carries
+    # the cumulative `output_tokens`. Both are emitted as Meta usage chunks; the
+    # accumulator's per-field merge reassembles the complete totals.
+    #
+    #   * `{"type":"error", ...}` → RAISE (200-OK in-stream error; see below).
+    #   * `message_start` (`message.usage`) → one normalized Meta usage chunk.
+    #   * `content_block_start` → text/thinking (non-empty) or a tool_use delta.
+    #   * `content_block_delta` → text / thinking / input_json_delta fragment.
+    #   * `message_delta` → finish_reason Meta + (top-level usage) usage Meta.
+    #   * `message_stop`/`content_block_stop`/`ping`/unknown/blank/`[DONE]` → `[]`.
+    def decode_stream_event(event : ReqLLM::SSE::Event) : Array(ReqLLM::StreamChunk)
+      decode_stream_event(event.data)
+    end
+
+    # :ditto: convenience overload accepting the raw SSE `data` payload directly.
+    def decode_stream_event(data : String) : Array(ReqLLM::StreamChunk)
+      chunks = [] of ReqLLM::StreamChunk
+      stripped = data.strip
+      return chunks if stripped.empty? || stripped == "[DONE]"
+
+      parsed = JSON.parse(stripped)
+
+      # In-stream error frame: Anthropic streams `{"type":"error","error":{...}}`
+      # on a 200 OK connection (overloaded, server-side failure). The transport
+      # status was 200 so `Steps.error` never fired, so surface it here by
+      # raising — same posture as the OpenAI sibling (openai.cr) so a live
+      # failure isn't silently swallowed. Raising propagates to the consumer via
+      # the producer fiber, matching the non-streaming path.
+      if parsed["type"]?.try(&.as_s?) == "error"
+        err = parsed["error"]?
+        message = err.try(&.["message"]?).try(&.as_s?) ||
+                  err.try(&.["type"]?).try(&.as_s?) || parsed.to_json
+        raise ReqLLM::Error::API::Response.new("Anthropic stream error: #{message}")
+      end
+
+      case parsed["type"]?.try(&.as_s?)
+      when "message_start"
+        if usage = parsed.dig?("message", "usage")
+          if normalized = normalize_stream_usage(usage)
+            chunks << ReqLLM::StreamChunk.meta({"usage" => normalized})
+          end
+        end
+      when "content_block_start"
+        index = parsed["index"]?.try(&.as_i?) || 0
+        chunks.concat(decode_block_start(parsed["content_block"]?, index))
+      when "content_block_delta"
+        index = parsed["index"]?.try(&.as_i?) || 0
+        chunks.concat(decode_block_delta(parsed["delta"]?, index))
+      when "message_delta"
+        if reason = parsed.dig?("delta", "stop_reason").try(&.as_s?)
+          chunks << ReqLLM::StreamChunk.meta(
+            {"finish_reason" => JSON::Any.new(reason)})
+        end
+        if usage = parsed["usage"]?
+          if normalized = normalize_stream_usage(usage)
+            chunks << ReqLLM::StreamChunk.meta({"usage" => normalized})
+          end
+        end
+      else
+        # message_stop / content_block_stop / ping / unknown → []
+      end
+
+      chunks
+    end
+
+    # Decode a `content_block_start`'s `content_block` into zero-or-one chunk:
+    # `text`/`thinking` → the corresponding chunk (only when non-empty);
+    # `tool_use{id,name}` → an opening tool-call delta carrying id + name. Any
+    # other block type → `[]`.
+    private def decode_block_start(block : JSON::Any?, index : Int32) : Array(ReqLLM::StreamChunk)
+      chunks = [] of ReqLLM::StreamChunk
+      return chunks unless block
+
+      case block["type"]?.try(&.as_s?)
+      when "text"
+        if text = block["text"]?.try(&.as_s?)
+          chunks << ReqLLM::StreamChunk.text(text) unless text.empty?
+        end
+      when "thinking"
+        if text = block["thinking"]?.try(&.as_s?)
+          chunks << ReqLLM::StreamChunk.thinking(text) unless text.empty?
+        end
+      when "tool_use"
+        id = block["id"]?.try(&.as_s?)
+        name = block["name"]?.try(&.as_s?)
+        chunks << ReqLLM::StreamChunk.tool_call_delta(index, id: id, name: name)
+      else
+        # Unknown block types are ignored.
+      end
+
+      chunks
+    end
+
+    # Decode a `content_block_delta`'s `delta` into zero-or-one chunk:
+    # `text_delta{text}` → Content; `thinking_delta{thinking|text}` → Thinking;
+    # `input_json_delta{partial_json}` → a tool-call arguments fragment. Empty
+    # text emits nothing (matching upstream guards). Other delta types → `[]`.
+    private def decode_block_delta(delta : JSON::Any?, index : Int32) : Array(ReqLLM::StreamChunk)
+      chunks = [] of ReqLLM::StreamChunk
+      return chunks unless delta
+
+      case delta["type"]?.try(&.as_s?)
+      when "text_delta"
+        if text = delta["text"]?.try(&.as_s?)
+          chunks << ReqLLM::StreamChunk.text(text) unless text.empty?
+        end
+      when "thinking_delta"
+        text = delta["thinking"]?.try(&.as_s?) || delta["text"]?.try(&.as_s?)
+        if text && !text.empty?
+          chunks << ReqLLM::StreamChunk.thinking(text)
+        end
+      when "input_json_delta"
+        if partial = delta["partial_json"]?.try(&.as_s?)
+          chunks << ReqLLM::StreamChunk.tool_call_delta(
+            index, arguments_fragment: partial)
+        end
+      else
+        # Unknown delta types are ignored.
+      end
+
+      chunks
+    end
+
+    # Normalize a streaming `usage` object into the accumulator's canonical keys
+    # (`input_tokens`/`output_tokens`/`reasoning_tokens`/`cached_tokens` as Ints).
+    # Same source-key mapping as the non-streaming `decode_usage` (so a folded
+    # stream matches decode): `reasoning_output_tokens` → `reasoning_tokens`,
+    # `cache_read_input_tokens` → `cached_tokens`, both defaulting to 0. Returns
+    # nil when the value is not an object.
+    private def normalize_stream_usage(usage : JSON::Any) : JSON::Any?
+      return nil unless h = usage.as_h?
+      input = h["input_tokens"]?.try(&.as_i?) || 0
+      output = h["output_tokens"]?.try(&.as_i?) || 0
+      reasoning = h["reasoning_output_tokens"]?.try(&.as_i?) || 0
+      cached = h["cache_read_input_tokens"]?.try(&.as_i?) || 0
+
+      JSON::Any.new({
+        "input_tokens"     => JSON::Any.new(input.to_i64),
+        "output_tokens"    => JSON::Any.new(output.to_i64),
+        "reasoning_tokens" => JSON::Any.new(reasoning.to_i64),
+        "cached_tokens"    => JSON::Any.new(cached.to_i64),
+      } of String => JSON::Any)
+    end
+
     # Fold the Anthropic `content` block array into `{concatenated_text,
     # concatenated_thinking, tool_calls}` — mirroring how `ChunkAccumulator#finish`
     # folds a stream into ONE text part + ONE thinking part. `text` blocks append
