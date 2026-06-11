@@ -1,0 +1,31 @@
+name: ci
+
+# Runs on every push and pull request: format check, build, and the offline
+# spec suite. No `shards install` step — shard.yml declares no dependencies.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: "1.20.2"
+
+      - name: Format check
+        run: crystal tool format --check
+
+      - name: Build
+        run: crystal build src/trellis.cr -o /dev/null
+
+      - name: Spec
+        run: crystal spec
