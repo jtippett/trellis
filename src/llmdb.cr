@@ -11,12 +11,12 @@ module LLMDB
   VERSION = "2026-06-10"
 
   # Resolve a model spec (a `"provider:model[@tag]"` string or a `Spec`) against
-  # the embedded catalog. Raises `ReqLLM::Error::Invalid::Parameter` when the
+  # the embedded catalog. Raises `Trellis::Error::Invalid::Parameter` when the
   # spec is malformed or the model is not in the catalog.
   def self.model(spec : String | Spec) : Model
     if spec.is_a?(Spec)
       return Catalog.fetch?(spec.key) ||
-        raise ReqLLM::Error::Invalid::Parameter.new("Unknown model: #{spec.key}")
+        raise Trellis::Error::Invalid::Parameter.new("Unknown model: #{spec.key}")
     end
 
     # Try the literal "provider:id" first. Model ids may legitimately contain
@@ -31,7 +31,7 @@ module LLMDB
     # This also validates structure and raises on a malformed/unknown spec.
     parsed = Spec.parse(spec)
     Catalog.fetch?(parsed.key) ||
-      raise ReqLLM::Error::Invalid::Parameter.new("Unknown model: #{parsed.key}")
+      raise Trellis::Error::Invalid::Parameter.new("Unknown model: #{parsed.key}")
   end
 
   # All models in the catalog.

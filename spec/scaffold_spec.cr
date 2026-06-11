@@ -1,7 +1,7 @@
 require "./spec_helper"
 
-describe ReqLLM do
+describe Trellis do
   it "has a version" do
-    ReqLLM::VERSION.should eq("0.1.0")
+    Trellis::VERSION.should eq("0.1.0")
   end
 end

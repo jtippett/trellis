@@ -25,7 +25,7 @@ describe LLMDB do
   end
 
   it "raises for an unknown model" do
-    expect_raises(ReqLLM::Error::Invalid::Parameter) { LLMDB.model("openai:does-not-exist") }
+    expect_raises(Trellis::Error::Invalid::Parameter) { LLMDB.model("openai:does-not-exist") }
   end
 
   it "exposes all models and providers" do

@@ -1,19 +1,19 @@
 # Offline quickstart — runs with NO API key and NO network.
 #
 # It replays a recorded fixture (examples/fixtures/openai/hello.json) through the
-# real generate_text pipeline, so you can try cr_llm end-to-end before wiring up
+# real generate_text pipeline, so you can try trellis end-to-end before wiring up
 # a key. This is the same mechanism the test suite uses.
 #
 #   crystal run examples/offline_text.cr
 #
 # `require` and the fixture path are resolved relative to THIS file, so it works
 # from any working directory.
-require "../src/cr_llm"
+require "../src/trellis"
 
 # Point the fixture loader at this examples/ tree (default is spec/fixtures).
-ReqLLM::Fixture.base_dir = "#{__DIR__}/fixtures"
+Trellis::Fixture.base_dir = "#{__DIR__}/fixtures"
 
-resp = ReqLLM.generate_text(
+resp = Trellis.generate_text(
   "openai:gpt-4o-mini",
   "Say hello.",
   fixture: "hello",

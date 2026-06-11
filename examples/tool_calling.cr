@@ -4,12 +4,12 @@
 # Requires an OpenAI key (see basic_text.cr for how to provide it).
 #
 #   crystal run examples/tool_calling.cr
-require "../src/cr_llm"
+require "../src/trellis"
 
-ReqLLM::Keys.load_env_file("#{__DIR__}/../.env")
+Trellis::Keys.load_env_file("#{__DIR__}/../.env")
 
 # A tool is a name + description + JSON-Schema parameters.
-weather = ReqLLM::Tool.new(
+weather = Trellis::Tool.new(
   "get_weather",
   "Get the current weather for a location",
   {
@@ -22,7 +22,7 @@ weather = ReqLLM::Tool.new(
 )
 
 begin
-  resp = ReqLLM.generate_text(
+  resp = Trellis.generate_text(
     "openai:gpt-4o-mini",
     "What's the weather in Paris? Use the get_weather tool.",
     tools: [weather],
@@ -36,7 +36,7 @@ begin
     puts "  -> #{call.name}(#{call.args_map})"
   end
   puts "cost:          #{resp.usage.try(&.cost_str) || "n/a"}"
-rescue ex : ReqLLM::Error
-  STDERR.puts "cr_llm error: #{ex.message}"
+rescue ex : Trellis::Error
+  STDERR.puts "trellis error: #{ex.message}"
   exit 1
 end

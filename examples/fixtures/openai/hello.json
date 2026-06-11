@@ -3,5 +3,5 @@
   "headers": {
     "content-type": "application/json"
   },
-  "body": "{\"id\":\"chatcmpl-example0001\",\"object\":\"chat.completion\",\"created\":1736300000,\"model\":\"gpt-4o-mini-2024-07-18\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Hello from cr_llm! This reply came from a recorded fixture \\u2014 no network, no API key.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":18,\"total_tokens\":30},\"system_fingerprint\":\"fp_example\"}"
+  "body": "{\"id\":\"chatcmpl-example0001\",\"object\":\"chat.completion\",\"created\":1736300000,\"model\":\"gpt-4o-mini-2024-07-18\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Hello from trellis! This reply came from a recorded fixture \\u2014 no network, no API key.\"},\"logprobs\":null,\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":18,\"total_tokens\":30},\"system_fingerprint\":\"fp_example\"}"
 }
