@@ -1,0 +1,7 @@
+{
+  "status": 200,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": "{\"id\":\"msg_object00\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-3-5-sonnet-20241022\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_x\",\"name\":\"structured_output\",\"input\":{\"name\":\"Alice\",\"age\":30}}],\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":12,\"output_tokens\":9}}"
+}

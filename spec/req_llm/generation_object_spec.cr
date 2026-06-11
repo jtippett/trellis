@@ -49,6 +49,26 @@ describe "ReqLLM.generate_object" do
     end
   end
 
+  it "returns the validated object from an Anthropic tool_use fixture (no API key)" do
+    saved = ENV["ANTHROPIC_API_KEY"]?
+    ENV.delete("ANTHROPIC_API_KEY")
+
+    resp = ReqLLM.generate_object(
+      "anthropic:claude-3-5-sonnet-20241022", "Give me a person", person_schema,
+      fixture: "object_basic")
+
+    resp.should be_a(ReqLLM::Response)
+    obj = resp.object.not_nil!
+    obj["name"].as_s.should eq("Alice")
+    obj["age"].as_i.should eq(30)
+  ensure
+    if saved
+      ENV["ANTHROPIC_API_KEY"] = saved
+    else
+      ENV.delete("ANTHROPIC_API_KEY")
+    end
+  end
+
   it "raises Error::Validation when the fixture content violates the schema" do
     saved = ENV["OPENAI_API_KEY"]?
     ENV.delete("OPENAI_API_KEY")
