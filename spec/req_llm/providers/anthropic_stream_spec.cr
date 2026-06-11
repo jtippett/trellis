@@ -128,7 +128,9 @@ describe ReqLLM::Providers::Anthropic do
 
     it "folds a content stream with SPLIT usage through the accumulator, proving the merge (integration)" do
       frames = [
-        %({"type":"message_start","message":{"usage":{"input_tokens":11,"cache_read_input_tokens":2}}}),
+        # message_start carries a small nonzero output_tokens (as real Anthropic
+        # does), so the output merge is a genuine max(2, 7)==7 — not max-from-0.
+        %({"type":"message_start","message":{"usage":{"input_tokens":11,"cache_read_input_tokens":2,"output_tokens":2}}}),
         %({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
         %({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Streaming "}}),
         %({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"works."}}),

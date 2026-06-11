@@ -525,8 +525,9 @@ module ReqLLM::Providers
 
     # Decode a `content_block_delta`'s `delta` into zero-or-one chunk:
     # `text_delta{text}` → Content; `thinking_delta{thinking|text}` → Thinking;
-    # `input_json_delta{partial_json}` → a tool-call arguments fragment. Empty
-    # text emits nothing (matching upstream guards). Other delta types → `[]`.
+    # `input_json_delta{partial_json}` → a tool-call arguments fragment. An empty
+    # text/thinking fragment adds nothing once folded, so we skip it (consistent
+    # with the OpenAI sibling). Other delta types → `[]`.
     private def decode_block_delta(delta : JSON::Any?, index : Int32) : Array(ReqLLM::StreamChunk)
       chunks = [] of ReqLLM::StreamChunk
       return chunks unless delta
