@@ -26,4 +26,21 @@ describe ReqLLM::Response do
     ReqLLM::FinishReason.from_wire(nil).should eq(ReqLLM::FinishReason::Other)
     ReqLLM::FinishReason.from_wire("banana").should eq(ReqLLM::FinishReason::Other)
   end
+
+  it "maps the Anthropic-specific wire finish reasons (AU3, additive)" do
+    ReqLLM::FinishReason.from_wire("stop_sequence").should eq(ReqLLM::FinishReason::Stop)
+    ReqLLM::FinishReason.from_wire("model_context_window_exceeded").should eq(ReqLLM::FinishReason::Length)
+    ReqLLM::FinishReason.from_wire("refusal").should eq(ReqLLM::FinishReason::ContentFilter)
+    # pause_turn has no Incomplete value in this port → Other (acceptable).
+    ReqLLM::FinishReason.from_wire("pause_turn").should eq(ReqLLM::FinishReason::Other)
+  end
+
+  it "keeps the existing OpenAI/Google wire tokens unchanged after the AU3 extension" do
+    ReqLLM::FinishReason.from_wire("stop").should eq(ReqLLM::FinishReason::Stop)
+    ReqLLM::FinishReason.from_wire("end_turn").should eq(ReqLLM::FinishReason::Stop)
+    ReqLLM::FinishReason.from_wire("tool_use").should eq(ReqLLM::FinishReason::ToolCalls)
+    ReqLLM::FinishReason.from_wire("tool_calls").should eq(ReqLLM::FinishReason::ToolCalls)
+    ReqLLM::FinishReason.from_wire("max_tokens").should eq(ReqLLM::FinishReason::Length)
+    ReqLLM::FinishReason.from_wire("content_filter").should eq(ReqLLM::FinishReason::ContentFilter)
+  end
 end

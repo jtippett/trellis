@@ -369,9 +369,120 @@ module ReqLLM::Providers
       true
     end
 
-    # AU3 fills this: decode a Messages JSON response into a semantic `Response`.
+    # Response step: decode a Messages JSON response into a semantic `Response`,
+    # populating the assistant message, finish reason, and usage so the
+    # downstream usage/cost steps work end-to-end. Ports
+    # `Anthropic.Response.decode_response` (content blocks → parts/tool_calls,
+    # `stop_reason` → finish reason, cache-aware usage) and mirrors the OpenAI
+    # sibling's context merge.
     def decode_response(req : HTTP::Request, resp : HTTP::Response) : {HTTP::Request, HTTP::Response}
-      raise "AU3"
+      model = req.model.as(LLMDB::Model)
+      data = JSON.parse(resp.body)
+
+      model_name = data["model"]?.try(&.as_s?) || model.id
+      finish_reason = ReqLLM::FinishReason.from_wire(data["stop_reason"]?.try(&.as_s?))
+
+      # PARITY with ChunkAccumulator#finish (accumulator.cr:100-136): build
+      # EXACTLY one concatenated text part (even ""), then ONE concatenated
+      # thinking part only when thinking is non-empty, then tool_calls.
+      # `decode_content` returns the joined strings + tool calls (NOT a pre-built
+      # parts list), so this shape is identical to a folded stream of the same
+      # logical content — guaranteeing `stream.join == decode`.
+      text, thinking, tool_calls = decode_content(data["content"]?)
+      parts = [ReqLLM::ContentPart.text(text)]
+      parts << ReqLLM::ContentPart.thinking(thinking) unless thinking.empty?
+
+      message = ReqLLM::Message.new(
+        ReqLLM::Role::Assistant,
+        parts,
+        tool_calls: tool_calls.empty? ? nil : tool_calls,
+      )
+
+      usage = decode_usage(data["usage"]?)
+
+      # CONTEXT MERGE (upstream `Context.merge_response`): the returned context is
+      # the input messages PLUS the appended assistant reply, so multi-turn
+      # callers can feed `resp.context` straight back in. Dup the input messages
+      # to avoid mutating the caller's `req.context`; tools are preserved.
+      input = req.context
+      merged_messages = input ? input.messages.dup : [] of ReqLLM::Message
+      merged_messages << message
+      merged_tools = input.try(&.tools) || [] of ReqLLM::Tool
+      merged_context = ReqLLM::Context.new(merged_messages, merged_tools)
+
+      resp.decoded = ReqLLM::Response.new(
+        model: model_name,
+        context: merged_context,
+        message: message,
+        usage: usage,
+        finish_reason: finish_reason,
+      )
+
+      {req, resp}
+    end
+
+    # Fold the Anthropic `content` block array into `{concatenated_text,
+    # concatenated_thinking, tool_calls}` — mirroring how `ChunkAccumulator#finish`
+    # folds a stream into ONE text part + ONE thinking part. `text` blocks append
+    # to the text builder; `thinking` blocks (key `thinking` OR `text`) append to
+    # the thinking builder; `tool_use` blocks become `ToolCall`s. Returning the
+    # joined strings (each possibly "") rather than a parts list guarantees
+    # `join == decode` for the same logical content (no multiple text parts, no
+    # thinking-only message lacking a text part). Absent/non-array content yields
+    # `{"", "", []}`.
+    private def decode_content(content : JSON::Any?) : {String, String, Array(ReqLLM::ToolCall)}
+      text = String::Builder.new
+      thinking = String::Builder.new
+      tool_calls = [] of ReqLLM::ToolCall
+
+      blocks = content.try(&.as_a?)
+      blocks.try &.each do |block|
+        h = block.as_h?
+        next unless h
+        case h["type"]?.try(&.as_s?)
+        when "text"
+          text << (h["text"]?.try(&.as_s?) || "")
+        when "thinking"
+          # Upstream accepts the reasoning text under `thinking` or `text`.
+          thinking << (h["thinking"]?.try(&.as_s?) || h["text"]?.try(&.as_s?) || "")
+        when "tool_use"
+          id = h["id"]?.try(&.as_s?) || ReqLLM::ToolCall.generate_id
+          name = h["name"]?.try(&.as_s?) || ""
+          input = h["input"]? || JSON::Any.new({} of String => JSON::Any)
+          tool_calls << ReqLLM::ToolCall.new(id, name, input.to_json)
+        else
+          # Unknown block types are ignored (multimodal/decode deferred).
+        end
+      end
+
+      {text.to_s, thinking.to_s, tool_calls}
+    end
+
+    # Decode the Anthropic `usage` object into `ReqLLM::Usage`. Ports
+    # `Anthropic.Response.parse_usage` (response.ex:363-368) for the fields our
+    # `Usage` carries: `input_tokens`, `output_tokens`,
+    # `cache_read_input_tokens` → `cached_tokens`,
+    # `reasoning_output_tokens` → `reasoning_tokens` (the codex parity fix —
+    # usage-decode parity, NOT reasoning-budget support). Absent usage → a zeroed
+    # `Usage` (parity with the OpenAI `decode_usage`, so `join == decode`).
+    private def decode_usage(usage : JSON::Any?) : ReqLLM::Usage
+      return ReqLLM::Usage.new unless usage
+      h = usage.as_h?
+      return ReqLLM::Usage.new unless h
+
+      input = h["input_tokens"]?.try(&.as_i?) || 0
+      output = h["output_tokens"]?.try(&.as_i?) || 0
+      cached = h["cache_read_input_tokens"]?.try(&.as_i?) || 0
+      reasoning = h["reasoning_output_tokens"]?.try(&.as_i?) || 0
+      # DEFERRED: `cache_creation_input_tokens` has no `Usage` field (cache-write
+      # billing is out of scope, matching usage.cr) — dropped here.
+
+      ReqLLM::Usage.new(
+        input_tokens: input,
+        output_tokens: output,
+        reasoning_tokens: reasoning,
+        cached_tokens: cached,
+      )
     end
 
     # Guard: a request's model must belong to this provider.
