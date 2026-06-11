@@ -185,7 +185,13 @@ module ReqLLM::Providers
       end
 
       return nil if blocks.empty?
-      if blocks.size == 1 && (only = blocks.first) && only["type"]?.try(&.as_s?) == "text"
+      # Collapse a lone bare `{type, text}` block (exactly 2 keys) to a string,
+      # matching upstream `normalize_system_content`'s `map_size == 2` guard: a
+      # single block carrying anything extra (e.g. a future `cache_control`
+      # breakpoint) must stay an array so the extra key is preserved. Mirrors the
+      # same guard in `encode_content`.
+      if blocks.size == 1 && (only = blocks.first) &&
+         only.size == 2 && only["type"]?.try(&.as_s?) == "text"
         only["text"]
       else
         JSON::Any.new(blocks.map { |b| JSON::Any.new(b) })
