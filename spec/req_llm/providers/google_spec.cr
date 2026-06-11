@@ -188,6 +188,36 @@ describe ReqLLM::Providers::Google do
       parts[1]["functionResponse"]["response"]["content"].should eq(JSON::Any.new("Sunny"))
     end
 
+    it "emits ONLY functionCall parts for an assistant with empty text + tool_calls (no empty text part)" do
+      tc = ReqLLM::ToolCall.new("call_1", "get_weather", %({"city":"Paris"}))
+      ctx = ReqLLM::Context.new([
+        ReqLLM::Message.new(ReqLLM::Role::User, "Weather?"),
+        ReqLLM::Message.new(ReqLLM::Role::Assistant, "", tool_calls: [tc]),
+      ])
+      model = LLMDB.model("google:gemini-2.0-flash")
+      opts = ReqLLM::Options.validate(NamedTuple.new)
+      parsed = JSON.parse(ReqLLM::Providers::Google.new.encode_chat_body(model, ctx, opts))
+
+      model_entry = parsed["contents"].as_a[1]
+      model_entry["role"].should eq(JSON::Any.new("model"))
+      parts = model_entry["parts"].as_a
+      # Empty assistant text is skipped — exactly one functionCall part, no {text:""}.
+      parts.size.should eq(1)
+      parts[0].as_h.has_key?("functionCall").should be_true
+      parts[0]["functionCall"]["name"].should eq(JSON::Any.new("get_weather"))
+    end
+
+    it "encodes a bare empty user message as a single empty-text part" do
+      ctx = ReqLLM::Context.new([ReqLLM::Message.new(ReqLLM::Role::User, "")])
+      model = LLMDB.model("google:gemini-2.0-flash")
+      opts = ReqLLM::Options.validate(NamedTuple.new)
+      parsed = JSON.parse(ReqLLM::Providers::Google.new.encode_chat_body(model, ctx, opts))
+
+      entry = parsed["contents"].as_a[0]
+      entry["role"].should eq(JSON::Any.new("user"))
+      entry["parts"].should eq(JSON.parse(%([{"text":""}])))
+    end
+
     it "uses \"unknown\" as the functionResponse name when the message has none" do
       ctx = ReqLLM::Context.new([
         ReqLLM::Message.new(ReqLLM::Role::Tool, "result", tool_call_id: "call_1"),
