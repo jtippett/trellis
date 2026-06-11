@@ -523,6 +523,110 @@ module ReqLLM::Providers
       total
     end
 
+    # Decode ONE Gemini `streamGenerateContent?alt=sse` event into zero-or-more
+    # `StreamChunk`s. PURE: no IO/concurrency. Each `data:` payload is a partial
+    # `GenerateContentResponse` (NOT a typed event), so we switch on the JSON
+    # SHAPE, not a `type` field. The chunks emit EXACTLY the metadata the
+    # `ChunkAccumulator` reads, so folding a stream yields the same `Response` as
+    # the non-streaming `decode_response`. Ports `decode_google_event` +
+    # `extract_chunks_from_parts` (google.ex:2548+, 2626+).
+    #
+    #   * `candidates[0].content.parts` → text / thinking / tool_call chunks
+    #     (`extract_chunks_from_parts`). functionCall parts arrive COMPLETE (full
+    #     args object) in one frame; emitted via `StreamChunk.tool_call` with
+    #     `{"index" => i, "id" => id}` metadata (i = position among functionCall
+    #     parts in THIS event), the accumulator's pre-assembled-args path.
+    #   * `candidates[0].finishReason` non-null → a trailing
+    #     `meta{finish_reason: <RAW wire>}` (emit the raw "STOP"; the
+    #     accumulator's Stop->ToolCalls upgrade handles the tool-call case — NO
+    #     per-frame override, so co-located vs separated frames behave the same).
+    #   * top-level `usageMetadata` → `meta{usage: <normalized canonical keys>}`.
+    #   * blank / `{}` / unrelated frame → `[]`. There is no `[DONE]` sentinel;
+    #     the stream just ends at EOF.
+    def decode_stream_event(event : ReqLLM::SSE::Event) : Array(ReqLLM::StreamChunk)
+      decode_stream_event(event.data)
+    end
+
+    # :ditto: convenience overload accepting the raw SSE `data` payload directly.
+    def decode_stream_event(data : String) : Array(ReqLLM::StreamChunk)
+      chunks = [] of ReqLLM::StreamChunk
+      stripped = data.strip
+      return chunks if stripped.empty?
+
+      parsed = JSON.parse(stripped)
+      candidate = parsed["candidates"]?.try(&.as_a?).try(&.first?)
+
+      if candidate
+        parts = candidate["content"]?.try(&.["parts"]?).try(&.as_a?)
+        chunks.concat(extract_chunks_from_parts(parts)) if parts
+
+        if reason = candidate["finishReason"]?.try(&.as_s?)
+          chunks << ReqLLM::StreamChunk.meta(
+            {"finish_reason" => JSON::Any.new(reason)})
+        end
+      end
+
+      if usage = parsed["usageMetadata"]?
+        chunks << ReqLLM::StreamChunk.meta(
+          {"usage" => normalize_google_usage_json(usage)})
+      end
+
+      chunks
+    end
+
+    # Map a candidate's `content.parts` to stream chunks (`extract_chunks_from_
+    # parts`): `{text}` non-empty & `thought != true` → Content; `{text,
+    # thought:true}` non-empty → Thinking; `{functionCall:{name,args}}` → a
+    # pre-assembled ToolCall chunk with `{"index" => i, "id" => id}` metadata,
+    # where `i` is the functionCall's position among functionCall parts in THIS
+    # event (so parallel calls co-located in one frame get distinct indices) and
+    # `id` is `functionCall["id"]` when present else a generated id.
+    private def extract_chunks_from_parts(parts : Array(JSON::Any)) : Array(ReqLLM::StreamChunk)
+      chunks = [] of ReqLLM::StreamChunk
+      fc_index = 0
+
+      parts.each do |part|
+        h = part.as_h?
+        next unless h
+
+        if fc = h["functionCall"]?.try(&.as_h?)
+          name = fc["name"]?.try(&.as_s?) || ""
+          id = fc["id"]?.try(&.as_s?) || ReqLLM::ToolCall.generate_id
+          args = fc["args"]?.try(&.as_h?) || {} of String => JSON::Any
+          chunks << ReqLLM::StreamChunk.tool_call(name, args,
+            {
+              "index" => JSON::Any.new(fc_index.to_i64),
+              "id"    => JSON::Any.new(id),
+            } of String => JSON::Any)
+          fc_index += 1
+        elsif (text = h["text"]?.try(&.as_s?)) && !text.empty?
+          if h["thought"]?.try(&.as_bool?) == true
+            chunks << ReqLLM::StreamChunk.thinking(text)
+          else
+            chunks << ReqLLM::StreamChunk.text(text)
+          end
+        end
+      end
+
+      chunks
+    end
+
+    # Normalize a Gemini `usageMetadata` object into the accumulator's CANONICAL
+    # streaming-usage keys (`input_tokens`/`output_tokens`/`reasoning_tokens`/
+    # `cached_tokens`, Ints). REUSES the shared `normalize_google_usage` (so a
+    # folded stream matches the non-streaming decode), then re-exposes it as the
+    # JSON::Any object `ChunkAccumulator#parse_usage` reads — mirroring the
+    # OpenAI/Anthropic `normalize_stream_usage` shape.
+    private def normalize_google_usage_json(usage : JSON::Any) : JSON::Any
+      u = normalize_google_usage(usage)
+      JSON::Any.new({
+        "input_tokens"     => JSON::Any.new(u.input_tokens.to_i64),
+        "output_tokens"    => JSON::Any.new(u.output_tokens.to_i64),
+        "reasoning_tokens" => JSON::Any.new(u.reasoning_tokens.to_i64),
+        "cached_tokens"    => JSON::Any.new(u.cached_tokens.to_i64),
+      } of String => JSON::Any)
+    end
+
     # Guard: a request's model must belong to this provider.
     private def ensure_provider!(model : LLMDB::Model) : Nil
       return if model.provider == id
