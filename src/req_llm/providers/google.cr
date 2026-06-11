@@ -356,9 +356,167 @@ module ReqLLM::Providers
     end
 
     # Response step: decode a `generateContent` JSON response into a semantic
-    # `Response`. Implemented in GU3.
+    # `Response`, populating the assistant message, finish reason, and usage so
+    # the downstream usage/cost steps work end-to-end. Ports
+    # `convert_google_to_openai_format` + `convert_google_parts_to_content` +
+    # `extract_tool_calls` + the usage normalization, but builds our `Response`
+    # DIRECTLY and mirrors the OpenAI/Anthropic context merge.
     def decode_response(req : HTTP::Request, resp : HTTP::Response) : {HTTP::Request, HTTP::Response}
-      raise "GU3"
+      model = req.model.as(LLMDB::Model)
+      data = JSON.parse(resp.body)
+
+      # Gemini returns `modelVersion`, not `model`; fall back to the request id.
+      model_name = data["modelVersion"]?.try(&.as_s?) || model.id
+
+      # Take candidates[0] (nilable throughout — absent/empty candidates or
+      # content still yield one empty text part for parity).
+      candidate = data["candidates"]?.try(&.as_a?).try(&.first?)
+
+      # PARITY with ChunkAccumulator#finish (accumulator.cr): build EXACTLY one
+      # concatenated text part (even ""), then ONE concatenated thinking part
+      # only when thinking is non-empty, then tool_calls. `decode_content`
+      # returns the joined strings + tool calls (NOT a pre-built parts list), so
+      # the shape is identical to a folded stream of the same logical content.
+      text, thinking, tool_calls = decode_content(candidate)
+      parts = [ReqLLM::ContentPart.text(text)]
+      parts << ReqLLM::ContentPart.thinking(thinking) unless thinking.empty?
+
+      message = ReqLLM::Message.new(
+        ReqLLM::Role::Assistant,
+        parts,
+        tool_calls: tool_calls.empty? ? nil : tool_calls,
+      )
+
+      # finish_reason: Gemini returns "STOP" even when the candidate carries
+      # `functionCall` parts; the meaningful finish is ToolCalls (mirrors
+      # google.ex:1764-1768). Otherwise map the wire token.
+      finish_reason =
+        if tool_calls.empty?
+          ReqLLM::FinishReason.from_wire(candidate.try(&.["finishReason"]?).try(&.as_s?))
+        else
+          ReqLLM::FinishReason::ToolCalls
+        end
+
+      usage = normalize_google_usage(data["usageMetadata"]?)
+
+      # CONTEXT MERGE (upstream `Context.merge_response`): input messages PLUS
+      # the appended assistant reply, tools preserved. Dup the input messages to
+      # avoid mutating the caller's `req.context`.
+      input = req.context
+      merged_messages = input ? input.messages.dup : [] of ReqLLM::Message
+      merged_messages << message
+      merged_tools = input.try(&.tools) || [] of ReqLLM::Tool
+      merged_context = ReqLLM::Context.new(merged_messages, merged_tools)
+
+      resp.decoded = ReqLLM::Response.new(
+        model: model_name,
+        context: merged_context,
+        message: message,
+        usage: usage,
+        finish_reason: finish_reason,
+      )
+
+      {req, resp}
+    end
+
+    # Fold a candidate's `content.parts` into `{concatenated_text,
+    # concatenated_thinking, tool_calls}` — mirroring how `ChunkAccumulator#finish`
+    # folds a stream into ONE text part + ONE thinking part. `{text}` with
+    # `thought != true` appends to the text builder; `{text, thought:true}`
+    # appends to the thinking builder; `{functionCall:{name,args}}` becomes a
+    # `ToolCall` (id = `functionCall["id"]` else generated; args object default
+    # `{}`). Returning joined strings (each possibly "") rather than a parts list
+    # guarantees `join == decode`. Absent candidate/content yields `{"", "", []}`.
+    private def decode_content(candidate : JSON::Any?) : {String, String, Array(ReqLLM::ToolCall)}
+      text = String::Builder.new
+      thinking = String::Builder.new
+      tool_calls = [] of ReqLLM::ToolCall
+
+      parts = candidate.try(&.["content"]?).try(&.["parts"]?).try(&.as_a?)
+      parts.try &.each do |part|
+        h = part.as_h?
+        next unless h
+
+        if fc = h["functionCall"]?.try(&.as_h?)
+          id = fc["id"]?.try(&.as_s?) || ReqLLM::ToolCall.generate_id
+          name = fc["name"]?.try(&.as_s?) || ""
+          args = fc["args"]? || JSON::Any.new({} of String => JSON::Any)
+          tool_calls << ReqLLM::ToolCall.new(id, name, args.to_json)
+        elsif (t = h["text"]?.try(&.as_s?))
+          if h["thought"]?.try(&.as_bool?) == true
+            thinking << t
+          else
+            text << t
+          end
+        end
+      end
+
+      {text.to_s, thinking.to_s, tool_calls}
+    end
+
+    # Normalize a Gemini `usageMetadata` object into `ReqLLM::Usage`. SHARED with
+    # streaming (GU4). Ports `google_usage_from_metadata` + `google_output_tokens`
+    # + `google_token_details_count` (google.ex:632-691):
+    #   * `input`     = `promptTokenCount`, else sum of
+    #                   `promptTokensDetails[].tokenCount`, else 0.
+    #   * `reasoning` = `thoughtsTokenCount` || 0.
+    #   * `cached`    = `cachedContentTokenCount` || 0.
+    #   * `output`    = `candidatesTokenCount + reasoning` when candidates is an
+    #                   int; elsif `totalTokenCount` int → `max(0, total - input)`;
+    #                   elsif `reasoning > 0` → `reasoning`; else 0.
+    # Absent `usageMetadata` → a zeroed `Usage` (parity with the OpenAI/Anthropic
+    # `decode_usage`, so `join == decode`).
+    private def normalize_google_usage(usage : JSON::Any?) : ReqLLM::Usage
+      return ReqLLM::Usage.new unless usage
+      h = usage.as_h?
+      return ReqLLM::Usage.new unless h
+
+      input = metadata_count(h, "promptTokenCount") ||
+              prompt_details_count(h["promptTokensDetails"]?) || 0
+      reasoning = metadata_count(h, "thoughtsTokenCount") || 0
+      cached = metadata_count(h, "cachedContentTokenCount") || 0
+      candidates = metadata_count(h, "candidatesTokenCount")
+      total = metadata_count(h, "totalTokenCount")
+
+      output =
+        if candidates
+          candidates + reasoning
+        elsif total
+          {0, total - input}.max
+        elsif reasoning > 0
+          reasoning
+        else
+          0
+        end
+
+      ReqLLM::Usage.new(
+        input_tokens: input,
+        output_tokens: output,
+        reasoning_tokens: reasoning,
+        cached_tokens: cached,
+      )
+    end
+
+    # Read a non-negative integer metadata count, else nil (ports
+    # `google_metadata_count`).
+    private def metadata_count(h : Hash(String, JSON::Any), key : String) : Int32?
+      count = h[key]?.try(&.as_i?)
+      return nil unless count && count >= 0
+      count
+    end
+
+    # Sum the non-negative `tokenCount` fields of a `promptTokensDetails` list,
+    # nil when absent/empty (ports `google_token_details_count`).
+    private def prompt_details_count(details : JSON::Any?) : Int32?
+      arr = details.try(&.as_a?)
+      return nil unless arr
+      total = nil.as(Int32?)
+      arr.each do |detail|
+        count = detail.as_h?.try(&.["tokenCount"]?).try(&.as_i?)
+        next unless count && count >= 0
+        total = (total || 0) + count
+      end
+      total
     end
 
     # Guard: a request's model must belong to this provider.

@@ -12,9 +12,9 @@ module ReqLLM
       when "stop", "end_turn", "stop_sequence", "STOP", "completed" then Stop
       when "length", "max_tokens", "max_output_tokens",
            "model_context_window_exceeded", "MAX_TOKENS" then Length
-      when "tool_calls", "tool_use"              then ToolCalls
-      when "content_filter", "refusal", "SAFETY" then ContentFilter
-      when nil                                   then Other
+      when "tool_calls", "tool_use"                            then ToolCalls
+      when "content_filter", "refusal", "RECITATION", "SAFETY" then ContentFilter
+      when nil                                                 then Other
         # Unknown wire reasons map to Other (deliberate: upstream is itself
         # inconsistent here, using :error in chat decode but :unknown in classify).
       else Other

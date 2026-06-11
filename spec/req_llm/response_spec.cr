@@ -43,4 +43,15 @@ describe ReqLLM::Response do
     ReqLLM::FinishReason.from_wire("max_tokens").should eq(ReqLLM::FinishReason::Length)
     ReqLLM::FinishReason.from_wire("content_filter").should eq(ReqLLM::FinishReason::ContentFilter)
   end
+
+  it "maps the Google-specific RECITATION wire finish reason (GU3, additive)" do
+    ReqLLM::FinishReason.from_wire("RECITATION").should eq(ReqLLM::FinishReason::ContentFilter)
+  end
+
+  it "keeps the existing Google wire tokens unchanged after the GU3 extension" do
+    ReqLLM::FinishReason.from_wire("STOP").should eq(ReqLLM::FinishReason::Stop)
+    ReqLLM::FinishReason.from_wire("MAX_TOKENS").should eq(ReqLLM::FinishReason::Length)
+    ReqLLM::FinishReason.from_wire("SAFETY").should eq(ReqLLM::FinishReason::ContentFilter)
+    ReqLLM::FinishReason.from_wire("OTHER").should eq(ReqLLM::FinishReason::Other)
+  end
 end
