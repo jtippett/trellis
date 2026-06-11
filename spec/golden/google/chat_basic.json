@@ -1,0 +1,22 @@
+{
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "You are terse."
+      }
+    ]
+  },
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "Hi"
+        }
+      ]
+    }
+  ],
+  "generationConfig": {
+    "temperature": 0.7
+  }
+}

@@ -72,9 +72,287 @@ module ReqLLM::Providers
     end
 
     # Request step: serialize the typed state into the Gemini request body.
-    # Implemented in GU2.
     def encode_body(req : HTTP::Request) : HTTP::Request
-      raise "GU2"
+      model = req.model.as(LLMDB::Model)
+      context = req.context.as(ReqLLM::Context)
+      opts = req.options.as(ReqLLM::Options::Validated)
+      req.body = encode_chat_body(model, context, opts)
+      req
+    end
+
+    # Build the Gemini `generateContent` request body as a JSON string. Public so
+    # the canonical golden test can exercise it without a full pipeline run. Ports
+    # `Google.encode_chat_body` + `split_messages_for_gemini` +
+    # `convert_messages_to_gemini`, but encodes DIRECTLY from our `Context` (no
+    # OpenAI-format intermediary). Note: NO `stream` kwarg — Gemini streaming is
+    # endpoint-based (`:streamGenerateContent`), so the body is byte-identical for
+    # streaming and non-streaming.
+    #
+    #   * `systemInstruction` — hoisted from `Role::System` messages, their text
+    #                           joined with "\n\n" into `{parts:[{text}]}`; omitted
+    #                           entirely when none / blank.
+    #   * `contents`          — non-system messages as `{role, parts}` (User→"user",
+    #                           Assistant→"model", Tool→"user"), with consecutive
+    #                           same-role entries folded into one.
+    #   * `tools`             — present only when non-empty:
+    #                           `[{functionDeclarations:[{name, description,
+    #                           parameters}]}]` (parameters deep-stripped of
+    #                           `$schema`/`additionalProperties`).
+    #   * `generationConfig`  — value-based `temperature`/`maxOutputTokens`/`topP`/
+    #                           `stopSequences`; omitted entirely when empty.
+    #                           CRITICAL: `maxOutputTokens` is OMITTED when
+    #                           `max_tokens` is unset (Gemini does NOT require it —
+    #                           the key difference from Anthropic).
+    #
+    # Key order (deterministic; pinned in the goldens): `systemInstruction?`,
+    # `contents`, `tools?`, `generationConfig?`.
+    def encode_chat_body(model : LLMDB::Model, context : ReqLLM::Context,
+                         opts : ReqLLM::Options::Validated) : String
+      body = {} of String => JSON::Any
+
+      system, non_system = partition_system(context.messages)
+      if si = encode_system_instruction(system)
+        body["systemInstruction"] = si
+      end
+
+      contents = merge_consecutive_roles(non_system.map { |m| encode_message(m) })
+      body["contents"] = JSON::Any.new(contents.map { |c| JSON::Any.new(c) })
+
+      tools = opts.fetch_tools
+      unless tools.empty?
+        decls = tools.map { |t| JSON::Any.new(encode_tool(t)) }
+        body["tools"] = JSON::Any.new([JSON::Any.new(
+          {"functionDeclarations" => JSON::Any.new(decls)} of String => JSON::Any)])
+      end
+
+      if gc = encode_generation_config(opts)
+        body["generationConfig"] = gc
+      end
+
+      body.to_json
+    end
+
+    # Split messages into `{system, non_system}` by `role.system?`. System
+    # messages are hoisted into the top-level `systemInstruction`.
+    private def partition_system(messages : Array(ReqLLM::Message)) : {Array(ReqLLM::Message), Array(ReqLLM::Message)}
+      system = [] of ReqLLM::Message
+      non_system = [] of ReqLLM::Message
+      messages.each do |m|
+        if m.role.system?
+          system << m
+        else
+          non_system << m
+        end
+      end
+      {system, non_system}
+    end
+
+    # Hoist the system messages into the `systemInstruction` object: join each
+    # message's text (text parts joined) with "\n\n", dropping blank messages.
+    # Returns nil when the combined text is empty/blank (omitting the key), else
+    # `{parts:[{text: combined}]}` wrapped as `JSON::Any` (mirrors the Anthropic
+    # `encode_system` sibling).
+    private def encode_system_instruction(messages : Array(ReqLLM::Message)) : JSON::Any?
+      texts = messages.map { |m| message_text(m) }.reject(&.strip.empty?)
+      return nil if texts.empty?
+      combined = texts.join("\n\n")
+      return nil if combined.strip.empty?
+
+      JSON::Any.new({
+        "parts" => JSON::Any.new([JSON::Any.new(
+          {"text" => JSON::Any.new(combined)} of String => JSON::Any)]),
+      } of String => JSON::Any)
+    end
+
+    # Encode one non-system message to its Gemini `{role, parts}` shape:
+    #   * `Role::Tool` → a single `{functionResponse:{name, response:{content}}}`
+    #     part (RAISES when `tool_call_id` is nil).
+    #   * assistant with `tool_calls` → non-empty text part(s) ++ one
+    #     `{functionCall:{name, args}}` per call (args is the DECODED object).
+    #   * otherwise → text `{text}` parts (non-text parts skipped — multimodal
+    #     deferred); a message with no encodable parts → `[{text:""}]` (matches
+    #     upstream `convert_single_message_to_gemini`).
+    private def encode_message(message : ReqLLM::Message) : Hash(String, JSON::Any)
+      parts =
+        case message.role
+        when .tool?
+          encode_tool_result_parts(message)
+        when .assistant?
+          if (tool_calls = message.tool_calls) && !tool_calls.empty?
+            encode_assistant_with_tool_calls(message, tool_calls)
+          else
+            encode_text_parts(message)
+          end
+        else
+          encode_text_parts(message)
+        end
+
+      {
+        "role"  => JSON::Any.new(role_to_wire(message.role)),
+        "parts" => JSON::Any.new(parts),
+      } of String => JSON::Any
+    end
+
+    # Map a normal message's text parts to `{text}` parts (non-text skipped). A
+    # message with no encodable parts (or a bare empty-string message) collapses
+    # to `[{text:""}]`, matching upstream's handling of empty content.
+    private def encode_text_parts(message : ReqLLM::Message) : Array(JSON::Any)
+      parts = [] of JSON::Any
+      message.content.each do |part|
+        next unless part.type.text?
+        text = part.text || ""
+        parts << JSON::Any.new({"text" => JSON::Any.new(text)} of String => JSON::Any)
+      end
+      return parts unless parts.empty?
+      [JSON::Any.new({"text" => JSON::Any.new("")} of String => JSON::Any)]
+    end
+
+    # Assistant message with tool calls → any NON-EMPTY text part(s) followed by
+    # one `{functionCall:{name, args}}` per tool call, where `args` is the DECODED
+    # arguments object (`ToolCall#args_map`), not the raw JSON string.
+    private def encode_assistant_with_tool_calls(message : ReqLLM::Message,
+                                                 tool_calls : Array(ReqLLM::ToolCall)) : Array(JSON::Any)
+      parts = [] of JSON::Any
+      message.content.each do |part|
+        next unless part.type.text?
+        text = part.text || ""
+        next if text.empty?
+        parts << JSON::Any.new({"text" => JSON::Any.new(text)} of String => JSON::Any)
+      end
+
+      tool_calls.each do |tc|
+        parts << JSON::Any.new({
+          "functionCall" => JSON::Any.new({
+            "name" => JSON::Any.new(tc.name),
+            "args" => JSON::Any.new(tc.args_map),
+          } of String => JSON::Any),
+        } of String => JSON::Any)
+      end
+
+      parts
+    end
+
+    # `Role::Tool` → a single `{functionResponse:{name, response:{content}}}` part
+    # (upstream `build_tool_result_part`). `name` = the message's `name` getter
+    # when set, else `"unknown"` (`tool_result_name/1`); `response.content` = the
+    # message's joined text. RAISES when `tool_call_id` is nil (same posture as
+    # the Anthropic sibling).
+    private def encode_tool_result_parts(message : ReqLLM::Message) : Array(JSON::Any)
+      if message.tool_call_id.nil?
+        raise ReqLLM::Error::Invalid::Parameter.new("tool message missing tool_call_id")
+      end
+
+      name = message.name || "unknown"
+      content = message_text(message)
+      [JSON::Any.new({
+        "functionResponse" => JSON::Any.new({
+          "name"     => JSON::Any.new(name),
+          "response" => JSON::Any.new(
+            {"content" => JSON::Any.new(content)} of String => JSON::Any),
+        } of String => JSON::Any),
+      } of String => JSON::Any)]
+    end
+
+    # Fold consecutive entries sharing the SAME `role` into one, concatenating
+    # their `parts` arrays (upstream `merge_consecutive_roles`, google.ex:2248).
+    # Critical for parallel tool results: N `Role::Tool` messages all map to role
+    # "user" and must become ONE `{role:"user"}` entry with N functionResponse
+    # parts.
+    private def merge_consecutive_roles(entries : Array(Hash(String, JSON::Any))) : Array(Hash(String, JSON::Any))
+      result = [] of Hash(String, JSON::Any)
+      entries.each do |entry|
+        prev = result.last?
+        if prev && prev["role"]?.try(&.as_s?) == entry["role"]?.try(&.as_s?)
+          # Hash is a reference type, so mutating `prev` updates the entry in
+          # `result` in place.
+          prev["parts"] = JSON::Any.new(prev["parts"].as_a + entry["parts"].as_a)
+        else
+          result << entry
+        end
+      end
+      result
+    end
+
+    # Build `generationConfig` value-based: `temperature`, `maxOutputTokens` (from
+    # `max_tokens`), `topP` (from `top_p`), `stopSequences` (from `stop`: string →
+    # 1-element array; array as-is). Returns nil when empty (omitting the key).
+    # CRITICAL: `maxOutputTokens` is OMITTED when `max_tokens` is unset — Gemini
+    # does NOT require it (the key difference from Anthropic; do NOT default it).
+    private def encode_generation_config(opts : ReqLLM::Options::Validated) : JSON::Any?
+      config = {} of String => JSON::Any
+
+      if temperature = opts.fetch_float?(:temperature)
+        config["temperature"] = JSON::Any.new(temperature)
+      end
+
+      if max_tokens = opts.fetch_int?(:max_tokens)
+        config["maxOutputTokens"] = JSON::Any.new(max_tokens.to_i64)
+      end
+
+      if top_p = opts.fetch_float?(:top_p)
+        config["topP"] = JSON::Any.new(top_p)
+      end
+
+      case stop = opts.fetch_stop
+      when String
+        config["stopSequences"] = JSON::Any.new([JSON::Any.new(stop)])
+      when Array(String)
+        config["stopSequences"] = JSON::Any.new(stop.map { |s| JSON::Any.new(s) })
+      end
+
+      return nil if config.empty?
+      JSON::Any.new(config)
+    end
+
+    # Render a Tool to the Gemini `functionDeclarations` entry shape (upstream
+    # `to_google_format`): `{name, description, parameters}` where `parameters` is
+    # the normalized JSON Schema DEEP-STRIPPED of `$schema` and
+    # `additionalProperties` (forbidden by Gemini, schema.ex:707).
+    private def encode_tool(tool : ReqLLM::Tool) : Hash(String, JSON::Any)
+      {
+        "name"        => JSON::Any.new(tool.name),
+        "description" => JSON::Any.new(tool.description),
+        "parameters"  => deep_strip(JSON::Any.new(tool.to_json_schema),
+          ["$schema", "additionalProperties"]),
+      } of String => JSON::Any
+    end
+
+    # Recursively delete `keys` from EVERY nested object in `value` (ports
+    # `deep_delete_keys`). Arrays are mapped element-wise; scalars pass through.
+    private def deep_strip(value : JSON::Any, keys : Array(String)) : JSON::Any
+      if h = value.as_h?
+        cleaned = {} of String => JSON::Any
+        h.each do |k, v|
+          next if keys.includes?(k)
+          cleaned[k] = deep_strip(v, keys)
+        end
+        JSON::Any.new(cleaned)
+      elsif a = value.as_a?
+        JSON::Any.new(a.map { |e| deep_strip(e, keys) })
+      else
+        value
+      end
+    end
+
+    # Map our `Role` to the Gemini wire role: User→"user", Assistant→"model",
+    # Tool→"user" (tool results are delivered as a user turn). System never
+    # reaches here (hoisted into `systemInstruction` pre-partition).
+    private def role_to_wire(role : ReqLLM::Role) : String
+      case role
+      when .assistant? then "model"
+      when .tool?      then "user"
+      else                  "user"
+      end
+    end
+
+    # Join a message's text parts into a single string (non-text parts skipped).
+    private def message_text(message : ReqLLM::Message) : String
+      String.build do |io|
+        message.content.each do |part|
+          next unless part.type.text?
+          io << (part.text || "")
+        end
+      end
     end
 
     # Response step: decode a `generateContent` JSON response into a semantic
