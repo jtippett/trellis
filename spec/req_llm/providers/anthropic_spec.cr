@@ -127,6 +127,30 @@ describe ReqLLM::Providers::Anthropic do
       blocks[1]["tool_use_id"].should eq(JSON::Any.new("toolu_2"))
     end
 
+    it "encodes an assistant message with tool_calls as text + tool_use blocks" do
+      tc = ReqLLM::ToolCall.new("toolu_1", "get_weather", %({"location":"Paris"}))
+      ctx = ReqLLM::Context.new([
+        ReqLLM::Message.new(ReqLLM::Role::User, "Weather in Paris?"),
+        ReqLLM::Message.new(ReqLLM::Role::Assistant, "Let me check.", tool_calls: [tc]),
+      ])
+      model = LLMDB.model("anthropic:claude-3-5-sonnet-20241022")
+      opts = ReqLLM::Options.validate(NamedTuple.new)
+      parsed = JSON.parse(ReqLLM::Providers::Anthropic.new.encode_chat_body(model, ctx, opts))
+
+      assistant = parsed["messages"].as_a[1]
+      assistant["role"].should eq(JSON::Any.new("assistant"))
+      blocks = assistant["content"].as_a
+      blocks.size.should eq(2)
+      blocks[0]["type"].should eq(JSON::Any.new("text"))
+      blocks[0]["text"].should eq(JSON::Any.new("Let me check."))
+      use = blocks[1]
+      use["type"].should eq(JSON::Any.new("tool_use"))
+      use["id"].should eq(JSON::Any.new("toolu_1"))
+      use["name"].should eq(JSON::Any.new("get_weather"))
+      # input is the DECODED arguments object (not the raw JSON string).
+      use["input"]["location"].should eq(JSON::Any.new("Paris"))
+    end
+
     it "emits is_error:true on a tool result whose metadata flags an error" do
       ctx = ReqLLM::Context.new([
         ReqLLM::Message.new(ReqLLM::Role::Tool, "boom", tool_call_id: "toolu_1",
