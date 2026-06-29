@@ -8,7 +8,7 @@ require "./llmdb/catalog"
 module LLMDB
   # Catalog snapshot version (models.dev sync date). Bumped by the Task 19 sync
   # task whenever the vendored data changes.
-  VERSION = "2026-06-10"
+  VERSION = "2026-06-29"
 
   # Resolve a model spec (a `"provider:model[@tag]"` string or a `Spec`) against
   # the embedded catalog. Raises `Trellis::Error::Invalid::Parameter` when the
